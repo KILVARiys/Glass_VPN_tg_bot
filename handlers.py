@@ -3,18 +3,17 @@ import asyncio
 import time
 from datetime import datetime, timedelta
 from aiogram import Router, types, F, Bot
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import *
 from keyboards import *
 from utils import XUIClient
-from payment_platega import PlategaPaymentClient
 from config import STAR_PRICE, SUB_DAYS, PRICE_RUB, TRIAL_DAYS, REFERRAL_BONUS_DAYS
+from payment_platega import PlategaPaymentClient
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -22,11 +21,9 @@ router = Router()
 xui = XUIClient()
 platega = PlategaPaymentClient()
 
-# Хранилище для временных данных
 pending_payments = {}
-user_data = {}
 
-# Состояния для FSM
+
 class AdminStates(StatesGroup):
     waiting_for_mailing = State()
     waiting_for_mailing_confirm = State()
@@ -37,6 +34,7 @@ class AdminStates(StatesGroup):
     waiting_for_add_admin = State()
     waiting_for_remove_admin = State()
 
+
 class PromoStates(StatesGroup):
     waiting_for_promo = State()
 
@@ -44,14 +42,14 @@ class PromoStates(StatesGroup):
 # --- Функция активации подписки ---
 async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_method: str = "unknown"):
     """
-    Активирует подписку пользователю
+    Активирует подписку пользователю (добавляет дни)
     """
     user = get_user(telegram_id)
     if not user:
         logger.error(f"User {telegram_id} not found")
         return False, "Пользователь не найден"
     
-    # Обновляем дату подписки
+    # Обновляем дату подписки (добавляем дни)
     new_end = update_subscription(telegram_id, days)
     
     # Создаем/обновляем клиента в 3x-ui
@@ -65,19 +63,51 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
     try:
         await bot.send_message(
             telegram_id,
-            f"✅ *Подписка активирована!*\n\n"
+            f"✅ Подписка активирована!\n\n"
             f"💳 Способ оплаты: {payment_method}\n"
             f"📅 Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}\n"
             f"📆 Добавлено дней: {days}\n\n"
-            f"🔗 Ссылка для подключения будет отправлена в ближайшее время.\n"
-            f"При возникновении проблем обратитесь к @support",
-            parse_mode="Markdown",
+            f"🔗 Ссылка для подключения будет отправлена в ближайшее время.",
             reply_markup=main_menu()
         )
     except Exception as e:
         logger.error(f"Failed to send notification to {telegram_id}: {e}")
     
     return True, new_end
+
+
+# --- Функция активации пробной подписки ---
+async def activate_trial_subscription(telegram_id: int):
+    """
+    Активирует пробную подписку на TRIAL_DAYS дней
+    """
+    user = get_user(telegram_id)
+    if not user:
+        return False, "Пользователь не найден"
+    
+    # Проверяем, использовал ли уже пробный период
+    if user[5] == 1:
+        return False, "❌ Вы уже использовали пробный период!"
+    
+    # Проверяем, активна ли уже подписка
+    end_date = datetime.fromisoformat(user[4]) if user[4] else None
+    if end_date and end_date > datetime.now():
+        days_left = (end_date - datetime.now()).days
+        return False, f"❌ У вас уже активна подписка! Осталось {days_left} дней."
+    
+    # Активируем пробный период
+    result, message = await activate_subscription(
+        telegram_id,
+        TRIAL_DAYS,
+        "🎁 Пробный период"
+    )
+    
+    if result:
+        # Отмечаем, что пробный период использован
+        set_trial_used(telegram_id)
+        return True, f"✅ Пробный период на {TRIAL_DAYS} дня активирован!"
+    
+    return False, "❌ Ошибка активации пробного периода"
 
 
 # --- Команда /start ---
@@ -105,32 +135,27 @@ async def cmd_start(message: Message):
             referrer_id
         )
         
-        # Создаем клиента в 3x-ui с пробным периодом
-        xui.add_client(f"user_{telegram_id}@vpn.local", TRIAL_DAYS)
-        
         await message.answer(
-            f"🎉 *Добро пожаловать, {message.from_user.first_name}!*\n\n"
-            f"✅ Вам активирован пробный период на *{TRIAL_DAYS} дня*.\n\n"
+            f"🎉 Добро пожаловать, {message.from_user.first_name}!\n\n"
             f"📋 Используйте меню ниже для управления подпиской:\n"
-            f"• 📊 Профиль - просмотр статуса подписки\n"
+            f"• 🎁 Активировать пробную подписку - получите {TRIAL_DAYS} дня бесплатно\n"
             f"• 🛒 Купить - продление на 30 дней\n"
             f"• 🎁 Промокод - активация бонусных дней\n"
             f"• 👥 Рефералы - приглашайте друзей и получайте бонусы",
-            parse_mode="Markdown",
             reply_markup=main_menu()
         )
     else:
-        # Проверяем статус подписки
         end_date = datetime.fromisoformat(user[4]) if user[4] else None
         days_left = (end_date - datetime.now()).days if end_date else 0
         
-        status_text = "🟢 *Активна*" if days_left > 0 else "🔴 *Истекла*"
+        status_text = "🟢 Активна" if days_left > 0 else "🔴 Не активна"
+        trial_used = "✅ Использован" if user[5] == 1 else "❌ Не использован"
         
         await message.answer(
-            f"👋 *С возвращением, {message.from_user.first_name}!*\n\n"
+            f"👋 С возвращением, {message.from_user.first_name}!\n\n"
             f"📊 Статус подписки: {status_text}\n"
-            f"📅 Осталось дней: {days_left if days_left > 0 else 0}",
-            parse_mode="Markdown",
+            f"📅 Осталось дней: {days_left if days_left > 0 else 0}\n"
+            f"🎁 Пробный период: {trial_used}",
             reply_markup=main_menu()
         )
 
@@ -143,9 +168,8 @@ async def cmd_admin(message: Message):
         return
     
     await message.answer(
-        "🔐 *Административная панель*\n\n"
+        "🔐 Административная панель\n\n"
         "Выберите действие:",
-        parse_mode="Markdown",
         reply_markup=admin_menu()
     )
 
@@ -154,10 +178,7 @@ async def cmd_admin(message: Message):
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "❌ Действие отменено.",
-        reply_markup=main_menu()
-    )
+    await message.answer("❌ Действие отменено.", reply_markup=main_menu())
 
 
 # --- Обработчики callback'ов ---
@@ -172,8 +193,10 @@ async def profile_callback(callback: CallbackQuery):
     
     end_date = datetime.fromisoformat(user[4]) if user[4] else None
     days_left = (end_date - datetime.now()).days if end_date else 0
-    is_trial = "Да" if user[5] == 0 else "Нет"
+    is_trial = "✅ Использован" if user[5] == 1 else "❌ Не использован"
     ref_count = get_referral_count(callback.from_user.id)
+    
+    is_active = days_left > 0
     
     text = (
         f"👤 *Ваш профиль*\n\n"
@@ -187,11 +210,93 @@ async def profile_callback(callback: CallbackQuery):
         f"⭐ Бонусных дней: {user[6]}"
     )
     
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
+    await callback.message.edit_text(
+        text, 
+        parse_mode="Markdown",
+        reply_markup=profile_keyboard(is_active)
+    )
     await callback.answer()
 
 
-# Покупка подписки
+# --- АКТИВАЦИЯ ПРОБНОЙ ПОДПИСКИ ---
+@router.callback_query(F.data == "activate_trial")
+async def activate_trial_callback(callback: CallbackQuery):
+    telegram_id = callback.from_user.id
+    
+    user = get_user(telegram_id)
+    if not user:
+        await callback.answer("Пожалуйста, используйте /start", show_alert=True)
+        return
+    
+    if user[5] == 1:
+        await callback.answer("❌ Вы уже использовали пробный период!", show_alert=True)
+        return
+    
+    end_date = datetime.fromisoformat(user[4]) if user[4] else None
+    if end_date and end_date > datetime.now():
+        days_left = (end_date - datetime.now()).days
+        await callback.answer(
+            f"❌ У вас уже активна подписка! Осталось {days_left} дней.",
+            show_alert=True
+        )
+        return
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, активировать", callback_data="confirm_trial")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back")]
+    ])
+    
+    await callback.message.edit_text(
+        f"🎁 *Активация пробной подписки*\n\n"
+        f"Вы получите бесплатный доступ на *{TRIAL_DAYS} дня*.\n\n"
+        f"⚠️ Пробный период можно использовать только один раз!\n\n"
+        f"Подтвердите активацию:",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "confirm_trial")
+async def confirm_trial_callback(callback: CallbackQuery):
+    telegram_id = callback.from_user.id
+    
+    success, message = await activate_trial_subscription(telegram_id)
+    
+    if success:
+        await callback.message.edit_text(
+            f"✅ *Пробный период активирован!*\n\n"
+            f"🎉 Вы получили {TRIAL_DAYS} дня бесплатного доступа.\n\n"
+            f"📅 Подписка активна до: {(datetime.now() + timedelta(days=TRIAL_DAYS)).strftime('%d.%m.%Y %H:%M')}",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ {message}",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+    
+    await callback.answer()
+
+
+# --- ПРОДЛЕНИЕ ПОДПИСКИ ---
+@router.callback_query(F.data == "extend_subscription")
+async def extend_subscription_callback(callback: CallbackQuery):
+    """Обработчик кнопки 'Продлить подписку' из профиля"""
+    await callback.message.edit_text(
+        "💳 *Выберите способ оплаты для продления*\n\n"
+        "💰 Цена: 100 ₽ / 100 ⭐\n"
+        "📅 Срок: 30 дней\n\n"
+        "Выберите удобный способ:",
+        parse_mode="Markdown",
+        reply_markup=payment_methods()
+    )
+    await callback.answer()
+
+
+# --- Покупка подписки ---
 @router.callback_query(F.data == "buy")
 async def buy_callback(callback: CallbackQuery):
     await callback.message.edit_text(
@@ -215,32 +320,26 @@ async def pay_card_callback(callback: CallbackQuery):
         await callback.answer("Пожалуйста, используйте /start", show_alert=True)
         return
     
-    # Генерируем уникальный номер заказа
     order_id = f"order_{telegram_id}_{int(time.time())}"
     
-    # Создаем платеж через Platega.io
     result = platega.create_payment(
         amount=PRICE_RUB,
         description=f"Подписка VPN (30 дней) для пользователя {telegram_id}",
         order_id=order_id,
         return_url="https://t.me",
-        payment_method=2,  # 2 = СБП
+        payment_method=2,
     )
     
     if result["success"]:
-        # Сохраняем платеж в БД
         create_payment(result["transaction_id"], telegram_id, PRICE_RUB, "platega_sbp")
-        
-        # Сохраняем для проверки
         pending_payments[telegram_id] = result["transaction_id"]
         
         await callback.message.edit_text(
-            f"💳 *Оплата через СБП (Platega.io)*\n\n"
+            f"💳 *Оплата через СБП*\n\n"
             f"💰 Сумма: {PRICE_RUB} ₽\n"
             f"🆔 Заказ: {result['order_id']}\n\n"
             f"⬇️ Нажмите кнопку ниже для перехода на страницу оплаты.\n"
             f"✅ После оплаты нажмите 'Проверить оплату'.\n\n"
-            f"🔹 Вы будете перенаправлены в приложение вашего банка для оплаты через СБП.\n\n"
             f"⏳ Платеж действителен 15 минут.",
             parse_mode="Markdown",
             reply_markup=pay_card_button(result["payment_url"])
@@ -248,9 +347,7 @@ async def pay_card_callback(callback: CallbackQuery):
     else:
         error_msg = result.get("error", "Неизвестная ошибка")
         await callback.message.edit_text(
-            f"❌ *Ошибка при создании платежа*\n\n"
-            f"Причина: {error_msg}\n\n"
-            f"Попробуйте позже или выберите другой способ оплаты.",
+            f"❌ *Ошибка при создании платежа*\n\n{error_msg}",
             parse_mode="Markdown",
             reply_markup=payment_methods()
         )
@@ -269,7 +366,6 @@ async def check_payment_callback(callback: CallbackQuery):
     
     transaction_id = pending_payments[telegram_id]
     
-    # Проверяем статус платежа в Platega.io
     status = platega.check_payment_status(transaction_id)
     
     if not status["success"]:
@@ -280,10 +376,8 @@ async def check_payment_callback(callback: CallbackQuery):
         return
     
     if status["is_paid"]:
-        # Подтверждаем платеж в БД
         confirm_payment(transaction_id)
         
-        # Активируем подписку
         success, result = await activate_subscription(
             telegram_id, 
             SUB_DAYS, 
@@ -293,7 +387,7 @@ async def check_payment_callback(callback: CallbackQuery):
         if success:
             await callback.message.edit_text(
                 f"✅ *Оплата подтверждена!*\n\n"
-                f"🎉 Подписка успешно активирована!\n"
+                f"🎉 Подписка успешно продлена!\n"
                 f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
                 parse_mode="Markdown",
                 reply_markup=main_menu()
@@ -301,13 +395,11 @@ async def check_payment_callback(callback: CallbackQuery):
         else:
             await callback.message.edit_text(
                 "❌ *Ошибка активации подписки*\n\n"
-                "Платеж прошел, но возникла техническая ошибка.\n"
-                "Пожалуйста, обратитесь к администратору.",
+                "Платеж прошел, но возникла техническая ошибка.",
                 parse_mode="Markdown",
                 reply_markup=main_menu()
             )
         
-        # Удаляем из временного хранилища
         del pending_payments[telegram_id]
         
     else:
@@ -323,8 +415,7 @@ async def check_payment_callback(callback: CallbackQuery):
         
         if status_value in ["CANCELED", "FAILED"]:
             await callback.message.edit_text(
-                f"❌ *Платеж был отменен*\n\n"
-                f"Попробуйте еще раз или выберите другой способ оплаты.",
+                f"❌ *Платеж был отменен*\n\nПопробуйте еще раз.",
                 parse_mode="Markdown",
                 reply_markup=payment_methods()
             )
@@ -338,11 +429,11 @@ async def check_payment_callback(callback: CallbackQuery):
 async def pay_stars_callback(callback: CallbackQuery):
     await callback.message.answer_invoice(
         title="🌐 Подписка VPN (30 дней)",
-        description=f"Доступ к VPN-сервису на 30 дней\n\n"
-                    f"✅ Мгновенная активация\n"
-                    f"🔒 Безлимитный трафик\n"
-                    f"⚡ Высокая скорость\n\n"
-                    f"💰 Стоимость: 100 ⭐",
+        description="Доступ к VPN-сервису на 30 дней\n\n"
+                    "✅ Мгновенная активация\n"
+                    "🔒 Безлимитный трафик\n"
+                    "⚡ Высокая скорость\n\n"
+                    "💰 Стоимость: 100 ⭐",
         payload="subscription_30days_stars",
         currency="XTR",
         prices=[{"label": "Подписка на месяц", "amount": STAR_PRICE}],
@@ -374,7 +465,7 @@ async def successful_payment(message: Message):
     if success:
         await message.answer(
             f"✅ *Оплата Stars прошла успешно!*\n\n"
-            f"🎉 Подписка активирована!\n"
+            f"🎉 Подписка продлена!\n"
             f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
             parse_mode="Markdown",
             reply_markup=main_menu()
@@ -382,8 +473,7 @@ async def successful_payment(message: Message):
     else:
         await message.answer(
             "❌ *Ошибка активации подписки*\n\n"
-            "Платеж прошел, но возникла техническая ошибка.\n"
-            "Пожалуйста, обратитесь к администратору.",
+            "Платеж прошел, но возникла техническая ошибка.",
             parse_mode="Markdown",
             reply_markup=main_menu()
         )
@@ -444,23 +534,23 @@ async def referral_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery):
     text = (
-        f"ℹ️ *Помощь и поддержка*\n\n"
-        f"📌 *Как пользоваться ботом:*\n"
-        f"1️⃣ Используйте /start для начала\n"
-        f"2️⃣ Получите пробный период на 3 дня\n"
-        f"3️⃣ Купите подписку через меню\n\n"
-        f"💳 *Способы оплаты:*\n"
-        f"• СБП через Platega.io\n"
-        f"• Telegram Stars\n\n"
-        f"🎁 *Промокоды:*\n"
-        f"Вводите промокоды в соответствующем разделе\n\n"
-        f"👥 *Рефералы:*\n"
-        f"Приглашайте друзей и получайте бонусные дни\n\n"
-        f"❓ *Вопросы и поддержка:*\n"
-        f"@support_bot"
+        "Помощь и поддержка\n\n"
+        "Как пользоваться ботом:\n"
+        "1. Используйте /start для начала\n"
+        "2. Активируйте пробный период через кнопку в меню\n"
+        "3. Купите подписку через меню\n\n"
+        "Способы оплаты:\n"
+        "• СБП через Platega.io\n"
+        "• Telegram Stars\n\n"
+        "Промокоды:\n"
+        "Вводите промокоды в соответствующем разделе\n\n"
+        "Рефералы:\n"
+        "Приглашайте друзей и получайте бонусные дни\n\n"
+        "Вопросы и поддержка:\n"
+        "@support_bot"
     )
     
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
+    await callback.message.edit_text(text, reply_markup=back_button())
     await callback.answer()
 
 
@@ -533,15 +623,17 @@ async def process_mailing(message: Message, state: FSMContext):
     
     await state.update_data(mailing_text=message.text, mailing_id=message.message_id)
     
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_mailing")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_mailing")]
+    ])
+    
     await message.answer(
         "📨 *Подтверждение рассылки*\n\n"
         "Отправить это сообщение всем пользователям?\n\n"
         f"Текст сообщения:\n{message.text[:200]}...",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отправить", callback_data="confirm_mailing")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_mailing")]
-        ])
+        reply_markup=keyboard
     )
     await state.set_state(AdminStates.waiting_for_mailing_confirm)
 
@@ -573,7 +665,6 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
     )
     await callback.answer()
     
-    # Рассылаем
     for user in users:
         try:
             await callback.bot.send_message(
@@ -583,7 +674,7 @@ async def confirm_mailing(callback: CallbackQuery, state: FSMContext):
                 disable_web_page_preview=True
             )
             success += 1
-            await asyncio.sleep(0.05)  # Защита от флуда
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.error(f"Failed to send to {user[0]}: {e}")
             fail += 1
@@ -676,7 +767,6 @@ async def process_promo_uses(message: Message, state: FSMContext):
         code = data.get('promo_code')
         bonus = data.get('promo_bonus')
         
-        # Создаем промокод
         create_promocode(code, bonus, uses)
         
         await message.answer(
@@ -728,7 +818,6 @@ async def admin_delete_promo(callback: CallbackQuery, state: FSMContext):
 async def process_promo_delete(message: Message, state: FSMContext):
     code = message.text.strip().upper()
     
-    # Проверяем, существует ли промокод
     promo = get_promocode(code)
     if not promo:
         await message.answer("❌ Промокод не найден. Попробуйте снова:")
@@ -860,7 +949,6 @@ async def process_remove_admin(message: Message, state: FSMContext):
     try:
         admin_id = int(message.text.strip())
         
-        # Нельзя удалить самого себя
         if admin_id == message.from_user.id:
             await message.answer("❌ Вы не можете удалить самого себя!")
             return
