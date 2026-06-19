@@ -1,10 +1,10 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 def main_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Мой профиль", callback_data="profile")],
         [InlineKeyboardButton(text="🛒 Купить подписку", callback_data="buy")],
+        [InlineKeyboardButton(text="🎁 Активировать пробную подписку", callback_data="activate_trial")],
         [InlineKeyboardButton(text="🎁 Ввести промокод", callback_data="promo")],
         [InlineKeyboardButton(text="👥 Реферальная система", callback_data="referral")],
         [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="help")]
