@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import os
+import traceback
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
@@ -38,15 +39,12 @@ async def main():
     logger.info("🚀 ЗАПУСК БОТА")
     logger.info("=" * 50)
     
-    # 1. Инициализация базы данных
     logger.info("📂 Инициализация базы данных...")
     init_db()
     logger.info("✅ База данных готова")
     
-    # 2. Создаем клиент Platega.io
     platega_client = PlategaPaymentClient()
     
-    # 3. Создаем сессию (без прокси)
     session = AiohttpSession(timeout=60)
     
     bot = Bot(
@@ -59,11 +57,9 @@ async def main():
     dp.include_router(router)
     dp["platega_client"] = platega_client
     
-    # 4. Устанавливаем команды
     await set_bot_commands(bot)
     logger.info("✅ Команды бота установлены")
     
-    # 5. Запускаем бота
     logger.info("=" * 50)
     logger.info("🤖 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
     logger.info("=" * 50)
@@ -77,7 +73,6 @@ async def main():
         logger.info("👋 Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
-        import traceback
         traceback.print_exc()
     finally:
         await platega_client.close_async()
@@ -92,5 +87,4 @@ if __name__ == "__main__":
         logger.info("👋 Программа завершена")
     except Exception as e:
         logger.error(f"❌ Фатальная ошибка: {e}")
-        import traceback
         traceback.print_exc()
