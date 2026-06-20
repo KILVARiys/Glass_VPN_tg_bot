@@ -45,7 +45,6 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
         logger.error(f"User {telegram_id} not found")
         return False, "Пользователь не найден"
 
-    # 1. Создаём клиента в 3x-UI
     success, sub_id, msg = xui.create_client(
         email=user[3],
         days=days,
@@ -56,17 +55,14 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
     if not success:
         return False, f"Ошибка создания клиента: {msg}"
 
-    # 2. Обновляем дату в БД
     new_end = update_subscription(telegram_id, days)
 
-    # 3. Формируем ссылку
     if sub_id:
         sub_link = xui.get_subscription_link(sub_id)
         link_text = f"🔗 *Ссылка для подключения (SUB):*\n`{sub_link}`"
     else:
         link_text = "⚠️ Клиент создан, но ID подписки не получен. Ссылка недоступна."
 
-    # 4. Отправляем уведомление
     try:
         if bot is None:
             from config import BOT_TOKEN
@@ -81,7 +77,7 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
             f"📶 IP-лимит: 1\n\n"
             f"{link_text}",
             parse_mode="Markdown",
-            reply_markup=main_menu()
+            reply_markup=main_menu_without_trial()
         )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
@@ -94,7 +90,6 @@ async def activate_trial_subscription(telegram_id: int, bot: Bot = None):
     if not user:
         return False, "Пользователь не найден"
 
-    # Проверяем по индексу 6 (is_trial_used)
     if user[6] == 1:
         logger.info(f"Пользователь {telegram_id} уже использовал пробный период")
         return False, "❌ Вы уже использовали пробный период!"
@@ -166,7 +161,7 @@ async def cmd_start(message: Message):
             f"📊 Статус подписки: {status_text}\n"
             f"📅 Осталось дней: {days_left if days_left > 0 else 0}\n"
             f"🎁 Пробный период: {trial_used}",
-            reply_markup=main_menu()
+            reply_markup=main_menu_without_trial() if user[6] == 1 else main_menu()
         )
 
 
@@ -230,7 +225,6 @@ async def activate_trial_callback(callback: CallbackQuery):
         await callback.answer("Пожалуйста, используйте /start", show_alert=True)
         return
 
-    # Проверяем по индексу 6 (is_trial_used)
     if user[6] == 1:
         sub_id = xui.find_client_sub_id(user[3])
         if sub_id:
@@ -240,7 +234,7 @@ async def activate_trial_callback(callback: CallbackQuery):
                 f"Ваша ссылка для подключения:\n`{sub_link}`\n\n"
                 f"Вы можете продлить подписку через меню 'Купить подписку'.",
                 parse_mode="Markdown",
-                reply_markup=main_menu()
+                reply_markup=main_menu_without_trial()
             )
         else:
             await callback.message.edit_text(
@@ -248,7 +242,7 @@ async def activate_trial_callback(callback: CallbackQuery):
                 f"К сожалению, ваша ссылка для подключения не найдена.\n"
                 f"Обратитесь к администратору.",
                 parse_mode="Markdown",
-                reply_markup=main_menu()
+                reply_markup=main_menu_without_trial()
             )
         await callback.answer()
         return
@@ -265,7 +259,7 @@ async def activate_trial_callback(callback: CallbackQuery):
                 f"Ваша ссылка для подключения:\n`{sub_link}`\n\n"
                 f"Вы можете продлить подписку через меню 'Купить подписку'.",
                 parse_mode="Markdown",
-                reply_markup=main_menu()
+                reply_markup=main_menu_without_trial()
             )
         else:
             await callback.message.edit_text(
@@ -273,7 +267,7 @@ async def activate_trial_callback(callback: CallbackQuery):
                 f"Осталось дней: {days_left}\n"
                 f"Ссылка для подключения не найдена. Обратитесь к администратору.",
                 parse_mode="Markdown",
-                reply_markup=main_menu()
+                reply_markup=main_menu_without_trial()
             )
         await callback.answer()
         return
@@ -304,7 +298,7 @@ async def confirm_trial_callback(callback: CallbackQuery):
             f"🎉 Вы получили {TRIAL_DAYS} дня бесплатного доступа.\n\n"
             f"📅 Подписка активна до: {(datetime.now() + timedelta(days=TRIAL_DAYS)).strftime('%d.%m.%Y %H:%M')}",
             parse_mode="Markdown",
-            reply_markup=main_menu()
+            reply_markup=main_menu_without_trial()
         )
     else:
         await callback.message.edit_text(
@@ -409,7 +403,7 @@ async def check_payment_callback(callback: CallbackQuery):
                 f"🎉 Подписка успешно продлена!\n"
                 f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
                 parse_mode="Markdown",
-                reply_markup=main_menu()
+                reply_markup=main_menu_without_trial()
             )
         else:
             await callback.message.edit_text(
@@ -451,8 +445,8 @@ async def pay_stars_callback(callback: CallbackQuery):
         payload="subscription_30days_stars",
         currency="XTR",
         prices=[{"label": "Подписка на месяц", "amount": STAR_PRICE}],
-        provider_token="",
-        reply_markup=back_button()
+        provider_token=""
+        # reply_markup удалён
     )
     await callback.answer()
 
@@ -482,7 +476,7 @@ async def successful_payment(message: Message):
             f"🎉 Подписка продлена!\n"
             f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
             parse_mode="Markdown",
-            reply_markup=main_menu()
+            reply_markup=main_menu_without_trial()
         )
     else:
         await message.answer(
@@ -540,22 +534,22 @@ async def referral_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery):
     text = (
-        "ℹ️ *Помощь и поддержка*\n\n"
-        "📌 *Как пользоваться ботом:*\n"
+        "ℹ️ Помощь и поддержка\n\n"
+        "📌 Как пользоваться ботом:\n"
         "1️⃣ Используйте /start для начала\n"
         "2️⃣ Активируйте пробный период через кнопку в меню\n"
         "3️⃣ Купите или продлите подписку через меню\n\n"
-        "💳 *Способы оплаты:*\n"
+        "💳 Способы оплаты:\n"
         "• СБП через Platega.io\n"
         "• Telegram Stars\n\n"
-        "🎁 *Промокоды:*\n"
+        "🎁 Промокоды:\n"
         "Вводите промокоды в соответствующем разделе\n\n"
-        "👥 *Рефералы:*\n"
+        "👥 Рефералы:\n"
         "Приглашайте друзей и получайте бонусные дни\n\n"
-        "❓ *Вопросы и поддержка:*\n"
+        "❓ Вопросы и поддержка:\n"
         "@support_bot"
     )
-    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=back_button())
+    await callback.message.edit_text(text, reply_markup=back_button())
     await callback.answer()
 
 
