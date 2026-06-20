@@ -216,6 +216,30 @@ async def profile_callback(callback: CallbackQuery):
     )
     await callback.answer()
 
+@router.callback_query(F.data == "back")
+async def back_callback(callback: CallbackQuery, state: FSMContext):
+    await state.clear()  # на случай, если пользователь нажал Назад в середине FSM-процесса
+    user = get_user(callback.from_user.id)
+    trial_used = user and user[6] == 1
+
+    await callback.message.edit_text(
+        "📋 *Главное меню*\n\nВыберите действие:",
+        parse_mode="Markdown",
+        reply_markup=main_menu_without_trial() if trial_used else main_menu()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_payment")
+async def back_to_payment_callback(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "💳 *Выберите способ оплаты*\n\n"
+        "💰 Цена: 100 ₽\n"
+        "📅 Срок: 30 дней\n\n"
+        "Оплата через СБП/карту:",
+        parse_mode="Markdown",
+        reply_markup=payment_methods()
+    )
+    await callback.answer()
 
 @router.callback_query(F.data == "activate_trial")
 async def activate_trial_callback(callback: CallbackQuery):
@@ -794,13 +818,6 @@ async def back_admin(callback: CallbackQuery):
     await callback.answer()
 
 # ======================== ТИКЕТ-СИСТЕМА ============================
-
-from database import (
-    create_ticket, get_ticket, get_user_tickets, get_open_tickets,
-    add_ticket_reply, close_ticket, get_ticket_replies,
-)
-
-
 class TicketStates(StatesGroup):
     waiting_for_subject  = State()   # тема обращения
     waiting_for_message  = State()   # текст обращения

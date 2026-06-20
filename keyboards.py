@@ -93,7 +93,7 @@ def pay_card_button(url):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
         [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_payment")]
     ])
     return keyboard
 
