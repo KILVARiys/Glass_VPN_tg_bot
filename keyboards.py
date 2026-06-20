@@ -37,18 +37,13 @@ def profile_keyboard(is_active: bool):
 def payment_methods():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Карта/СБП (100 ₽)", callback_data="pay_card")],
-        [InlineKeyboardButton(text="⭐ Telegram Stars (100 ⭐)", callback_data="pay_stars")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
     ])
     return keyboard
 
 def buy_menu():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Карта/СБП (100 ₽)", callback_data="pay_card")],
-        [InlineKeyboardButton(text="⭐ Telegram Stars (100 ⭐)", callback_data="pay_stars")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
-    ])
-    return keyboard
+    # Можно использовать ту же клавиатуру, что и payment_methods
+    return payment_methods()
 
 def admin_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[

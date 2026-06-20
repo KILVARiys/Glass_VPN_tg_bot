@@ -11,7 +11,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from database import *
 from keyboards import *
 from utils import XUIClient
-from config import STAR_PRICE, SUB_DAYS, PRICE_RUB, TRIAL_DAYS, REFERRAL_BONUS_DAYS
+from config import SUB_DAYS, PRICE_RUB, TRIAL_DAYS, REFERRAL_BONUS_DAYS
 from payment_platega import PlategaPaymentClient
 
 logging.basicConfig(level=logging.INFO)
@@ -313,9 +313,9 @@ async def confirm_trial_callback(callback: CallbackQuery):
 async def extend_subscription_callback(callback: CallbackQuery):
     await callback.message.edit_text(
         "💳 *Выберите способ оплаты для продления*\n\n"
-        "💰 Цена: 100 ₽ / 100 ⭐\n"
+        "💰 Цена: 100 ₽\n"
         "📅 Срок: 30 дней\n\n"
-        "Выберите удобный способ:",
+        "Оплата через СБП/карту:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
     )
@@ -326,9 +326,9 @@ async def extend_subscription_callback(callback: CallbackQuery):
 async def buy_callback(callback: CallbackQuery):
     await callback.message.edit_text(
         "💳 *Выберите способ оплаты*\n\n"
-        "💰 Цена: 100 ₽ / 100 ⭐\n"
+        "💰 Цена: 100 ₽\n"
         "📅 Срок: 30 дней\n\n"
-        "Выберите удобный способ оплаты:",
+        "Оплата через СБП/карту:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
     )
@@ -433,59 +433,6 @@ async def check_payment_callback(callback: CallbackQuery):
             await callback.answer(message, show_alert=True)
 
 
-@router.callback_query(F.data == "pay_stars")
-async def pay_stars_callback(callback: CallbackQuery):
-    await callback.message.answer_invoice(
-        title="🌐 Подписка VPN (30 дней)",
-        description="Доступ к VPN-сервису на 30 дней\n\n"
-                    "✅ Мгновенная активация\n"
-                    "🔒 Безлимитный трафик\n"
-                    "⚡ Высокая скорость\n\n"
-                    "💰 Стоимость: 100 ⭐",
-        payload="subscription_30days_stars",
-        currency="XTR",
-        prices=[{"label": "Подписка на месяц", "amount": STAR_PRICE}],
-        provider_token=""
-        # reply_markup удалён
-    )
-    await callback.answer()
-
-
-@router.pre_checkout_query()
-async def pre_checkout_query(pre_checkout: types.PreCheckoutQuery):
-    await pre_checkout.answer(ok=True)
-
-
-@router.message(F.successful_payment)
-async def successful_payment(message: Message):
-    telegram_id = message.from_user.id
-    payment_id = f"stars_{telegram_id}_{int(datetime.now().timestamp())}"
-    create_payment(payment_id, telegram_id, STAR_PRICE, "stars")
-    confirm_payment(payment_id)
-
-    success, result = await activate_subscription(
-        telegram_id,
-        SUB_DAYS,
-        "⭐ Telegram Stars",
-        bot=message.bot
-    )
-
-    if success:
-        await message.answer(
-            f"✅ *Оплата Stars прошла успешно!*\n\n"
-            f"🎉 Подписка продлена!\n"
-            f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
-            parse_mode="Markdown",
-            reply_markup=main_menu_without_trial()
-        )
-    else:
-        await message.answer(
-            "❌ *Ошибка активации подписки*\n\nПлатеж прошел, но возникла техническая ошибка.",
-            parse_mode="Markdown",
-            reply_markup=main_menu()
-        )
-
-
 # ПРОМОКОДЫ
 @router.callback_query(F.data == "promo")
 async def promo_callback(callback: CallbackQuery, state: FSMContext):
@@ -540,8 +487,7 @@ async def help_callback(callback: CallbackQuery):
         "2️⃣ Активируйте пробный период через кнопку в меню\n"
         "3️⃣ Купите или продлите подписку через меню\n\n"
         "💳 Способы оплаты:\n"
-        "• СБП через Platega.io\n"
-        "• Telegram Stars\n\n"
+        "• СБП через Platega.io\n\n"
         "🎁 Промокоды:\n"
         "Вводите промокоды в соответствующем разделе\n\n"
         "👥 Рефералы:\n"

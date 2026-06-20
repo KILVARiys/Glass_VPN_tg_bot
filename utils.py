@@ -125,7 +125,7 @@ class XUIClient:
             return False, None, str(e)
 
     def find_client_sub_id(self, email):
-        """Ищет subId (UUID) клиента по email (используется в activate_trial_callback)"""
+        """Ищет subId (UUID) клиента по email"""
         if not self.logged_in:
             self.login()
         try:
@@ -141,7 +141,8 @@ class XUIClient:
                 clients = settings.get('clients', [])
                 for client in clients:
                     if client.get('email') == email:
-                        return client.get('id')
+                        # Приоритет subId, если есть, иначе id
+                        return client.get('subId') or client.get('id')
             return None
         except Exception as e:
             logger.error(f"Ошибка поиска subId: {e}")
