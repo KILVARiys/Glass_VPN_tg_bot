@@ -71,6 +71,29 @@ def init_db():
     from config import ADMIN_ID
     cur.execute("INSERT OR IGNORE INTO admins (telegram_id) VALUES (?)", (ADMIN_ID,))
     
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS tickets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            subject     TEXT    NOT NULL,
+            message     TEXT    NOT NULL,
+            status      TEXT    NOT NULL DEFAULT 'open',
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ticket_replies (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_id   INTEGER NOT NULL REFERENCES tickets(id),
+            sender_id   INTEGER NOT NULL,
+            is_admin    BOOLEAN NOT NULL DEFAULT 0,
+            message     TEXT    NOT NULL,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -310,3 +333,90 @@ def get_expired_users():
     users = cur.fetchall()
     conn.close()
     return users
+
+# ======================== ТИКЕТ-СИСТЕМА ========================
+
+def create_ticket(telegram_id: int, subject: str, message: str) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO tickets (telegram_id, subject, message) VALUES (?, ?, ?)",
+        (telegram_id, subject, message),
+    )
+    ticket_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return ticket_id
+
+
+def get_ticket(ticket_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tickets WHERE id = ?", (ticket_id,))
+    ticket = cur.fetchone()
+    conn.close()
+    return ticket
+
+
+def get_user_tickets(telegram_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM tickets WHERE telegram_id = ? ORDER BY created_at DESC",
+        (telegram_id,),
+    )
+    tickets = cur.fetchall()
+    conn.close()
+    return tickets
+
+
+def get_open_tickets():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM tickets WHERE status != 'closed' ORDER BY created_at ASC"
+    )
+    tickets = cur.fetchall()
+    conn.close()
+    return tickets
+
+
+def add_ticket_reply(ticket_id: int, sender_id: int, message: str, is_admin: bool = False) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO ticket_replies (ticket_id, sender_id, is_admin, message) VALUES (?, ?, ?, ?)",
+        (ticket_id, sender_id, int(is_admin), message),
+    )
+    reply_id = cur.lastrowid
+    new_status = "answered" if is_admin else "open"
+    cur.execute(
+        "UPDATE tickets SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (new_status, ticket_id),
+    )
+    conn.commit()
+    conn.close()
+    return reply_id
+
+
+def close_ticket(ticket_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE tickets SET status = 'closed', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (ticket_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_ticket_replies(ticket_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM ticket_replies WHERE ticket_id = ? ORDER BY created_at ASC",
+        (ticket_id,),
+    )
+    replies = cur.fetchall()
+    conn.close()
+    return replies

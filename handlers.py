@@ -480,8 +480,13 @@ async def referral_callback(callback: CallbackQuery):
 # ПОМОЩЬ
 @router.callback_query(F.data == "help")
 async def help_callback(callback: CallbackQuery):
-    text = (
-        "ℹ️ Помощь и поддержка\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✉️ Написать в поддержку", callback_data="new_ticket")],
+        [InlineKeyboardButton(text="📋 Мои обращения",        callback_data="my_tickets")],
+        [InlineKeyboardButton(text="🔙 Назад",                callback_data="back")],
+    ])
+    await callback.message.edit_text(
+        "ℹ️ *Помощь и поддержка*\n\n"
         "📌 Как пользоваться ботом:\n"
         "1️⃣ Используйте /start для начала\n"
         "2️⃣ Активируйте пробный период через кнопку в меню\n"
@@ -492,21 +497,24 @@ async def help_callback(callback: CallbackQuery):
         "Вводите промокоды в соответствующем разделе\n\n"
         "👥 Рефералы:\n"
         "Приглашайте друзей и получайте бонусные дни\n\n"
-        "❓ Вопросы и поддержка:\n"
-        "@support_bot"
+        "❓ Есть вопрос? Напишите в поддержку 👇",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
     )
-    await callback.message.edit_text(text, reply_markup=back_button())
     await callback.answer()
 
+# ======================== ДОКУМЕНТАЦИЯ ============================
 
-@router.callback_query(F.data == "back")
-async def back_callback(callback: CallbackQuery):
+@router.callback_query(F.data == "docs")
+async def docs_callback(callback: CallbackQuery):
+    """Показываем меню раздела Документация."""
     await callback.message.edit_text(
-        "📋 *Главное меню*\n\nВыберите действие:",
-        reply_markup=main_menu()
+        "📄 *Документация*\n\n"
+        "Выберите документ, который хотите прочитать:",
+        parse_mode="Markdown",
+        reply_markup=docs_menu()
     )
     await callback.answer()
-
 
 # ======================== АДМИН-ПАНЕЛЬ ============================
 
@@ -784,3 +792,382 @@ async def back_admin(callback: CallbackQuery):
         reply_markup=admin_menu()
     )
     await callback.answer()
+
+# ======================== ТИКЕТ-СИСТЕМА ============================
+
+from database import (
+    create_ticket, get_ticket, get_user_tickets, get_open_tickets,
+    add_ticket_reply, close_ticket, get_ticket_replies,
+)
+
+
+class TicketStates(StatesGroup):
+    waiting_for_subject  = State()   # тема обращения
+    waiting_for_message  = State()   # текст обращения
+    waiting_for_reply    = State()   # ответ от админа на конкретный тикет
+
+
+# ── Вспомогательные клавиатуры ──────────────────────────────────────────────────────────
+
+def ticket_list_keyboard(tickets: list, is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Список тикетов в виде кнопок."""
+    status_emoji = {"open": "🟡", "answered": "🟢", "closed": "⚫"}
+    buttons = []
+    for t in tickets:
+        tid, tg_id, subject, _, status, *_ = t
+        emoji = status_emoji.get(status, "❓")
+        label = f"{emoji} #{tid} — {subject[:30]}"
+        cb = f"admin_ticket_{tid}" if is_admin else f"my_ticket_{tid}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=cb)])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back" if not is_admin else "back_admin")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def ticket_detail_keyboard(ticket_id: int, status: str, is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки внутри конкретного тикета."""
+    buttons = []
+    if is_admin:
+        if status != "closed":
+            buttons.append([InlineKeyboardButton(
+                text="✏️ Ответить пользователю",
+                callback_data=f"admin_reply_{ticket_id}"
+            )])
+            buttons.append([InlineKeyboardButton(
+                text="🔒 Закрыть тикет",
+                callback_data=f"admin_close_{ticket_id}"
+            )])
+        buttons.append([InlineKeyboardButton(text="🔙 К списку", callback_data="admin_tickets")])
+    else:
+        if status != "closed":
+            buttons.append([InlineKeyboardButton(
+                text="🔒 Закрыть обращение",
+                callback_data=f"user_close_{ticket_id}"
+            )])
+        buttons.append([InlineKeyboardButton(text="🔙 К моим обращениям", callback_data="my_tickets")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _format_ticket_history(ticket, replies) -> str:
+    """Форматирует историю переписки по тикету."""
+    tid, tg_id, subject, first_msg, status, created_at, updated_at = ticket
+    status_label = {"open": "🟡 Открыт", "answered": "🟢 Отвечен", "closed": "⚫ Закрыт"}.get(status, status)
+
+    lines = [
+        f"🎫 Тикет #{tid} | {status_label}",
+        f"📌 Тема: {subject}",
+        f"📅 Создан: {created_at[:16]}",
+        "",
+        "─" * 30,
+        f"👤 Пользователь ({created_at[:16]}):",
+        first_msg,
+        "─" * 30,
+    ]
+    for r in replies:
+        rid, r_ticket_id, sender_id, is_admin_flag, r_msg, r_time = r
+        author = "🛡 Поддержка" if is_admin_flag else "👤 Пользователь"
+        lines += [f"{author} ({r_time[:16]}):", r_msg, "─" * 30]
+
+    return "\n".join(lines)
+
+
+# ── ПОЛЬЗОВАТЕЛЬСКАЯ ЧАСТЬ ──────────────────────────────────────────────────────────────
+@router.callback_query(F.data == "new_ticket")
+async def new_ticket_start(callback: CallbackQuery, state: FSMContext):
+    """Шаг 1: просим тему обращения."""
+    user_tickets = get_user_tickets(callback.from_user.id)
+    open_count = sum(1 for t in user_tickets if t[4] != "closed")
+    if open_count >= 3:
+        await callback.answer(
+            "⚠️ У вас уже есть 3 открытых обращения. Дождитесь ответа или закройте старые.",
+            show_alert=True,
+        )
+        return
+
+    await callback.message.edit_text(
+        "✉️ *Новое обращение в поддержку*\n\n"
+        "Шаг 1/2 — Укажите *тему* обращения (до 60 символов):\n\n"
+        "_Например: Не работает подключение_\n\n"
+        "Для отмены введите /cancel",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="help")]
+        ]),
+    )
+    await state.set_state(TicketStates.waiting_for_subject)
+    await callback.answer()
+
+
+@router.message(TicketStates.waiting_for_subject)
+async def ticket_subject_received(message: Message, state: FSMContext):
+    subject = message.text.strip()[:60]
+    await state.update_data(subject=subject)
+    await message.answer(
+        f"✉️ *Новое обращение в поддержку*\n\n"
+        f"Тема: *{subject}*\n\n"
+        f"Шаг 2/2 — Опишите вашу проблему подробнее:\n\n"
+        f"Для отмены введите /cancel",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="help")]
+        ]),
+    )
+    await state.set_state(TicketStates.waiting_for_message)
+
+
+@router.message(TicketStates.waiting_for_message)
+async def ticket_message_received(message: Message, state: FSMContext):
+    data = await state.get_data()
+    subject = data.get("subject", "Без темы")
+    text = message.text.strip()
+
+    ticket_id = create_ticket(message.from_user.id, subject, text)
+    await state.clear()
+
+    # Уведомляем всех админов
+    admins = get_all_admins()
+    user = get_user(message.from_user.id)
+    username = f"@{user[1]}" if user and user[1] else str(message.from_user.id)
+    admin_text = (
+        f"🎫 *Новый тикет #{ticket_id}*\n\n"
+        f"👤 Пользователь: {username} (`{message.from_user.id}`)\n"
+        f"📌 Тема: {subject}\n\n"
+        f"💬 Сообщение:\n{text}"
+    )
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✏️ Ответить на #{ticket_id}", callback_data=f"admin_reply_{ticket_id}")]
+    ])
+    for admin_id in admins:
+        try:
+            await message.bot.send_message(admin_id, admin_text, parse_mode="Markdown", reply_markup=admin_kb)
+        except Exception:
+            pass
+
+    await message.answer(
+        f"✅ *Обращение #{ticket_id} создано!*\n\n"
+        f"Мы ответим вам в ближайшее время. "
+        f"Следить за статусом можно в разделе «Мои обращения».",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Мои обращения", callback_data="my_tickets")],
+            [InlineKeyboardButton(text="🔙 В меню",        callback_data="back")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "my_tickets")
+async def my_tickets_callback(callback: CallbackQuery):
+    tickets = get_user_tickets(callback.from_user.id)
+    if not tickets:
+        await callback.message.edit_text(
+            "📋 *Мои обращения*\n\nУ вас пока нет обращений.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✉️ Создать обращение", callback_data="new_ticket")],
+                [InlineKeyboardButton(text="🔙 Назад",             callback_data="help")],
+            ]),
+        )
+    else:
+        await callback.message.edit_text(
+            "📋 *Мои обращения*\n\nВыберите тикет для просмотра:",
+            parse_mode="Markdown",
+            reply_markup=ticket_list_keyboard(tickets, is_admin=False),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("my_ticket_"))
+async def my_ticket_detail(callback: CallbackQuery):
+    ticket_id = int(callback.data.split("_")[-1])
+    ticket = get_ticket(ticket_id)
+
+    if not ticket or ticket[1] != callback.from_user.id:
+        await callback.answer("❌ Тикет не найден.", show_alert=True)
+        return
+
+    replies = get_ticket_replies(ticket_id)
+    text = _format_ticket_history(ticket, replies)
+    await callback.message.edit_text(
+        text,
+        reply_markup=ticket_detail_keyboard(ticket_id, ticket[4], is_admin=False),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("user_close_"))
+async def user_close_ticket(callback: CallbackQuery):
+    ticket_id = int(callback.data.split("_")[-1])
+    ticket = get_ticket(ticket_id)
+
+    if not ticket or ticket[1] != callback.from_user.id:
+        await callback.answer("❌ Тикет не найден.", show_alert=True)
+        return
+
+    close_ticket(ticket_id)
+    await callback.message.edit_text(
+        f"⚫ Обращение #{ticket_id} закрыто.\n\nЕсли вопрос возникнет снова — создайте новое.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Мои обращения",      callback_data="my_tickets")],
+            [InlineKeyboardButton(text="✉️ Новое обращение",    callback_data="new_ticket")],
+            [InlineKeyboardButton(text="🔙 В меню",             callback_data="back")],
+        ]),
+    )
+    await callback.answer("Тикет закрыт.")
+
+
+# ── АДМИНСКАЯ ЧАСТЬ ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "admin_tickets")
+async def admin_tickets_list(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    tickets = get_open_tickets()
+    if not tickets:
+        await callback.message.edit_text(
+            "📭 Открытых тикетов нет.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_admin")]
+            ]),
+        )
+    else:
+        await callback.message.edit_text(
+            f"🎫 *Открытые тикеты* ({len(tickets)}):\n\n"
+            "🟡 — новый  🟢 — отвечен  ⚫ — закрыт",
+            parse_mode="Markdown",
+            reply_markup=ticket_list_keyboard(tickets, is_admin=True),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_ticket_"))
+async def admin_ticket_detail(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split("_")[-1])
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("❌ Тикет не найден.", show_alert=True)
+        return
+
+    replies = get_ticket_replies(ticket_id)
+    # Добавляем telegram_id юзера в заголовок для удобства
+    user = get_user(ticket[1])
+    username = f"@{user[1]}" if user and user[1] else str(ticket[1])
+    text = f"👤 От: {username} (`{ticket[1]}`)\n\n" + _format_ticket_history(ticket, replies)
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=ticket_detail_keyboard(ticket_id, ticket[4], is_admin=True),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_reply_"))
+async def admin_reply_start(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split("_")[-1])
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("❌ Тикет не найден.", show_alert=True)
+        return
+
+    await state.update_data(reply_ticket_id=ticket_id, reply_user_id=ticket[1])
+    await callback.message.edit_text(
+        f"✏️ *Ответ на тикет #{ticket_id}*\n\n"
+        f"Тема: {ticket[2]}\n\n"
+        f"Напишите ответ пользователю. Для отмены — /cancel",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin_ticket_{ticket_id}")]
+        ]),
+    )
+    await state.set_state(TicketStates.waiting_for_reply)
+    await callback.answer()
+
+
+@router.message(TicketStates.waiting_for_reply)
+async def admin_reply_send(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    ticket_id = data.get("reply_ticket_id")
+    user_id   = data.get("reply_user_id")
+
+    if not ticket_id or not user_id:
+        await message.answer("❌ Ошибка состояния. Попробуйте снова.")
+        await state.clear()
+        return
+
+    reply_text = message.text.strip()
+    add_ticket_reply(ticket_id, message.from_user.id, reply_text, is_admin=True)
+    await state.clear()
+
+    # Уведомляем пользователя
+    try:
+        await message.bot.send_message(
+            user_id,
+            f"📬 *Ответ на ваше обращение #{ticket_id}*\n\n"
+            f"🛡 Поддержка:\n{reply_text}\n\n"
+            f"Вы можете просмотреть всю переписку в разделе «Мои обращения».",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📋 Открыть тикет", callback_data=f"my_ticket_{ticket_id}")]
+            ]),
+        )
+        notify_status = "✅ Пользователь уведомлён."
+    except Exception as e:
+        logger.error(f"Не удалось уведомить пользователя {user_id}: {e}")
+        notify_status = "⚠️ Не удалось уведомить пользователя (заблокировал бота?)."
+
+    await message.answer(
+        f"✅ Ответ на тикет #{ticket_id} отправлен.\n{notify_status}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🎫 К тикету",   callback_data=f"admin_ticket_{ticket_id}")],
+            [InlineKeyboardButton(text="📋 Все тикеты", callback_data="admin_tickets")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin_close_"))
+async def admin_close_ticket(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещён.", show_alert=True)
+        return
+
+    ticket_id = int(callback.data.split("_")[-1])
+    ticket = get_ticket(ticket_id)
+    if not ticket:
+        await callback.answer("❌ Тикет не найден.", show_alert=True)
+        return
+
+    close_ticket(ticket_id)
+
+    # Уведомляем пользователя о закрытии
+    try:
+        await callback.bot.send_message(
+            ticket[1],
+            f"⚫ Ваше обращение #{ticket_id} закрыто администратором.\n\n"
+            f"Если вопрос не решён, создайте новое обращение.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✉️ Новое обращение", callback_data="new_ticket")]
+            ]),
+        )
+    except Exception:
+        pass
+
+    await callback.message.edit_text(
+        f"⚫ Тикет #{ticket_id} закрыт.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Все тикеты", callback_data="admin_tickets")],
+            [InlineKeyboardButton(text="🔙 Назад",      callback_data="back_admin")],
+        ]),
+    )
+    await callback.answer("Тикет закрыт.")
