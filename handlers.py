@@ -223,6 +223,13 @@ async def profile_callback(callback: CallbackQuery):
     else:
         sub_info = "Не активна"
 
+    # --- получаем ссылку на подписку ---
+    sub_link = None
+    sub_id = xui.find_client_sub_id(user[3])  # user[3] — это email пользователя
+    if sub_id:
+        sub_link = xui.get_subscription_link(sub_id)
+    # ------------------------------------------
+
     text = (
         f"👤 *Мой профиль*\n\n"
         f"🆔 *Telegram ID:* `{user[0]}`\n"
@@ -230,10 +237,11 @@ async def profile_callback(callback: CallbackQuery):
         f"👥 *Рефералы:* {ref_count}\n"
         f"🎁 *Пробная подписка:* {is_trial}"
     )
+
     await callback.message.edit_text(
         text,
         parse_mode="Markdown",
-        reply_markup=profile_keyboard(is_active)
+        reply_markup=profile_keyboard(is_active)  # только is_active, без sub_link
     )
     await callback.answer()
 
@@ -259,6 +267,41 @@ async def back_to_payment_callback(callback: CallbackQuery):
         "Оплата через СБП/карту:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "my_sub_link")
+async def my_sub_link_callback(callback: CallbackQuery):
+    user = get_user(callback.from_user.id)
+    if not user:
+        await callback.answer("Пожалуйста, используйте /start", show_alert=True)
+        return
+
+    sub_id = xui.find_client_sub_id(user[3])
+    if not sub_id:
+        await callback.answer("❌ Ссылка не найдена. Обратитесь к администратору.", show_alert=True)
+        return
+
+    sub_link = xui.get_subscription_link(sub_id)
+
+    end_date = datetime.fromisoformat(user[5]) if user[5] else None
+    days_left = max(0, (end_date - datetime.now()).days) if end_date else 0
+    expiry_str = end_date.strftime('%d\\.%m\\.%Y') if end_date else "—"
+
+    limit_ip = 1
+    devices_text = f"{limit_ip} устр\\."
+
+    await callback.message.edit_text(
+        f"🔗 *Ваша ссылка:*\n`{sub_link}`\n\n"
+        f"📖 *Как использовать:*\n"
+        f"1\\. Нажмите на ссылку выше, чтобы скопировать\n"
+        f"2\\. Откройте приложение \\(Happ / v2RayTun\\)\n"
+        f"3\\. Нажмите «\\+» → «Импорт из буфера обмена»\n\n"
+        f"📅 *Подписка до:* {expiry_str}\n"
+        f"⏳ *Осталось:* {days_left} дн\\.\n\n"
+        f"ℹ️ Ссылку можно использовать на всех ваших устройствах \\(до {devices_text}\\)",
+        parse_mode="MarkdownV2",
+        reply_markup=back_button()
     )
     await callback.answer()
 

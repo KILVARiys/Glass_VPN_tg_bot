@@ -43,17 +43,18 @@ def docs_menu():
 
 
 def profile_keyboard(is_active: bool):
+    buttons = []
+
     if is_active:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Продлить подписку (30 дней)", callback_data="extend_subscription")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
-        ])
+        buttons.append([InlineKeyboardButton(text="🔗 Моя ссылка для подключения", callback_data="my_sub_link")])
+        buttons.append([InlineKeyboardButton(text="🔄 Продлить подписку (30 дней)", callback_data="extend_subscription")])
     else:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Купить подписку", callback_data="buy")],
-            [InlineKeyboardButton(text="🎁 Активировать пробную подписку", callback_data="activate_trial")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
-        ])
+        buttons.append([InlineKeyboardButton(text="🛒 Купить подписку", callback_data="buy")])
+        buttons.append([InlineKeyboardButton(text="🎁 Активировать пробную подписку", callback_data="activate_trial")])
+
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back")])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def payment_methods():
