@@ -45,23 +45,50 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
         logger.error(f"User {telegram_id} not found")
         return False, "Пользователь не найден"
 
+    # Определяем лимит устройств: пробная = 1, платная = 3
+    is_trial = payment_method == "🎁 Пробный период"
+    limit_ip = 1 if is_trial else 3
+
     success, sub_id, msg = xui.create_client(
         email=user[3],
         days=days,
         total_gb=10,
-        limit_ip=1
+        limit_ip=limit_ip
     )
 
     if not success:
         return False, f"Ошибка создания клиента: {msg}"
 
     new_end = update_subscription(telegram_id, days)
+    days_left = (new_end - datetime.now()).days
+    expiry_str = new_end.strftime('%d.%m.%Y')
 
     if sub_id:
         sub_link = xui.get_subscription_link(sub_id)
-        link_text = f"🔗 *Ссылка для подключения (SUB):*\n`{sub_link}`"
     else:
-        link_text = "⚠️ Клиент создан, но ID подписки не получен. Ссылка недоступна."
+        sub_link = None
+
+    devices_text = "1 устройство" if is_trial else "3 устройства"
+
+    if sub_link:
+        message_text = (
+            f"✅ *Подписка активирована!*\n\n"
+            f"🔗 *Ваша ссылка:*\n`{sub_link}`\n\n"
+            f"📖 *Как использовать:*\n"
+            f"1\\. Нажмите на ссылку выше, чтобы скопировать\n"
+            f"2\\. Откройте приложение \\(Happ / v2RayTun\\)\n"
+            f"3\\. Нажмите «\\+» → «Импорт из буфера обмена»\n\n"
+            f"📅 *Подписка до:* {expiry_str}\n"
+            f"⏳ *Осталось:* {days_left} дн\\.\n\n"
+            f"ℹ️ Ссылку можно использовать на всех ваших устройствах \\(до {devices_text}\\)"
+        )
+    else:
+        message_text = (
+            f"✅ *Подписка активирована!*\n\n"
+            f"⚠️ Ссылка не найдена, обратитесь к администратору\\.\n\n"
+            f"📅 *Подписка до:* {expiry_str}\n"
+            f"⏳ *Осталось:* {days_left} дн\\."
+        )
 
     try:
         if bot is None:
@@ -69,14 +96,8 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_
             bot = Bot(token=BOT_TOKEN)
         await bot.send_message(
             telegram_id,
-            f"✅ *Подписка активирована!*\n\n"
-            f"💳 Способ оплаты: {payment_method}\n"
-            f"📅 Подписка активна до: {new_end.strftime('%d.%m.%Y %H:%M')}\n"
-            f"📆 Добавлено дней: {days}\n"
-            f"📊 Трафик: 10 ГБ\n"
-            f"📶 IP-лимит: 1\n\n"
-            f"{link_text}",
-            parse_mode="Markdown",
+            message_text,
+            parse_mode="MarkdownV2",
             reply_markup=main_menu_without_trial()
         )
     except Exception as e:
@@ -256,6 +277,10 @@ async def activate_trial_callback(callback: CallbackQuery):
             await callback.message.edit_text(
                 f"ℹ️ *Вы уже использовали пробный период!*\n\n"
                 f"Ваша ссылка для подключения:\n`{sub_link}`\n\n"
+                f"📖 *Как использовать:*\n"
+                f"1\\. Нажмите на ссылку выше, чтобы скопировать\n"
+                f"2\\. Откройте приложение \\(Happ / v2RayTun\\)\n"
+                f"3\\. Нажмите «\\+» → «Импорт из буфера обмена»\n\n"
                 f"Вы можете продлить подписку через меню 'Купить подписку'.",
                 parse_mode="Markdown",
                 reply_markup=main_menu_without_trial()
@@ -317,13 +342,7 @@ async def confirm_trial_callback(callback: CallbackQuery):
     success, message = await activate_trial_subscription(telegram_id, bot=callback.bot)
 
     if success:
-        await callback.message.edit_text(
-            f"✅ *Пробный период активирован!*\n\n"
-            f"🎉 Вы получили {TRIAL_DAYS} дня бесплатного доступа.\n\n"
-            f"📅 Подписка активна до: {(datetime.now() + timedelta(days=TRIAL_DAYS)).strftime('%d.%m.%Y %H:%M')}",
-            parse_mode="Markdown",
-            reply_markup=main_menu_without_trial()
-        )
+        await callback.message.delete()
     else:
         await callback.message.edit_text(
             f"❌ {message}",
@@ -414,28 +433,22 @@ async def check_payment_callback(callback: CallbackQuery):
         return
 
     if status["is_paid"]:
-        confirm_payment(transaction_id)
-        success, result = await activate_subscription(
-            telegram_id,
-            SUB_DAYS,
-            "СБП (Platega.io)",
-            bot=callback.bot
-        )
-        if success:
-            await callback.message.edit_text(
-                f"✅ *Оплата подтверждена!*\n\n"
-                f"🎉 Подписка успешно продлена!\n"
-                f"📅 Действительна до: {result.strftime('%d.%m.%Y %H:%M')}",
-                parse_mode="Markdown",
-                reply_markup=main_menu_without_trial()
+            confirm_payment(transaction_id)
+            success, result = await activate_subscription(
+                telegram_id,
+                SUB_DAYS,
+                "СБП (Platega.io)",
+                bot=callback.bot
             )
-        else:
-            await callback.message.edit_text(
-                "❌ *Ошибка активации подписки*\n\nПлатеж прошел, но возникла техническая ошибка.",
-                parse_mode="Markdown",
-                reply_markup=main_menu()
-            )
-        del pending_payments[telegram_id]
+            if success:
+                await callback.message.delete()
+            else:
+                await callback.message.edit_text(
+                    "❌ *Ошибка активации подписки*\n\nПлатеж прошел, но возникла техническая ошибка.",
+                    parse_mode="Markdown",
+                    reply_markup=main_menu()
+                )
+            del pending_payments[telegram_id]
     else:
         status_value = status.get("status", "unknown")
         status_messages = {
