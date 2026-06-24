@@ -31,7 +31,7 @@ def docs_menu():
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🔒 Политика конфиденциальности",
-            url="https://telegra.ph/Politika-konfidencialnosti-04-01-26"
+            url="https://telegra.ph/Politika-konfidencialnosti-06-21-31"
         )],
         [InlineKeyboardButton(
             text="📋 Пользовательское соглашение",
