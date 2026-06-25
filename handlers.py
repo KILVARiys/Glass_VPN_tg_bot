@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 
 from database import *
 from keyboards import *
@@ -425,11 +426,13 @@ async def buy_callback(callback: CallbackQuery):
 async def pay_card_callback(callback: CallbackQuery):
     telegram_id = callback.from_user.id
     user = get_user(telegram_id)
+
     if not user:
         await callback.answer("Пожалуйста, используйте /start", show_alert=True)
         return
 
     order_id = f"order_{telegram_id}_{int(time.time())}"
+
     result = platega.create_payment(
         amount=PRICE_RUB,
         description=f"Подписка VPN (30 дней) для пользователя {telegram_id}",
@@ -441,23 +444,33 @@ async def pay_card_callback(callback: CallbackQuery):
     if result["success"]:
         create_payment(result["transaction_id"], telegram_id, PRICE_RUB, "platega_sbp")
         pending_payments[telegram_id] = result["transaction_id"]
-        await callback.message.edit_text(
-            f"💳 *Оплата через СБП*\n\n"
-            f"💰 Сумма: {PRICE_RUB} ₽\n"
-            f"🆔 Заказ: {result['order_id']}\n\n"
-            f"⬇️ Нажмите кнопку ниже для перехода на страницу оплаты.\n"
-            f"✅ После оплаты нажмите 'Проверить оплату'.\n\n"
-            f"⏳ Платеж действителен 15 минут.",
-            parse_mode="Markdown",
-            reply_markup=pay_card_button(result["payment_url"])
-        )
+
+        try:
+            await callback.message.edit_text(
+                f"💳 *Оплата через СБП*\n\n"
+                f"💰 Сумма: {PRICE_RUB} ₽\n"
+                f"🆔 Заказ: {result['order_id']}\n\n"
+                f"⬇️ Нажмите кнопку ниже для перехода на страницу оплаты.\n"
+                f"✅ После оплаты нажмите 'Проверить оплату'.\n\n"
+                f"⏳ Платеж действителен 30 минут.",
+                parse_mode="Markdown",
+                reply_markup=pay_card_button(result["payment_url"])
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
     else:
         error_msg = result.get("error", "Неизвестная ошибка")
-        await callback.message.edit_text(
-            f"❌ *Ошибка при создании платежа*\n\n{error_msg}",
-            parse_mode="Markdown",
-            reply_markup=payment_methods()
-        )
+        try:
+            await callback.message.edit_text(
+                f"❌ *Ошибка при создании платежа*\n\n{error_msg}",
+                parse_mode="Markdown",
+                reply_markup=payment_methods()
+            )
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+
     await callback.answer()
 
 

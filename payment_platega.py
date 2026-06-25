@@ -1,111 +1,179 @@
 import logging
-import uuid
+import hmac
+import hashlib
+import json
+from uuid import uuid4
 from typing import Optional, Dict, Any
+from datetime import datetime
 
 import aiohttp
 import requests
 
-from config import PLATEGA_MERCHANT_ID, PLATEGA_SECRET_KEY, WEBHOOK_HOST, WEBHOOK_PATH
+from config import PLATEGA_MERCHANT_ID, PLATEGA_SECRET_KEY, WEBHOOK_HOST
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Методы оплаты Platega.io (см. "Список доступных методов оплат") ---
-PAYMENT_METHOD_SBP = 2            # СБП / QR (НСПК)
-PAYMENT_METHOD_CARD_RU = 10       # Карты МИР
-PAYMENT_METHOD_INTERNATIONAL = 12  # Международный эквайринг
-
-# --- Статусы транзакции (PaymentStatus) ---
-STATUS_PENDING = "PENDING"
-STATUS_CONFIRMED = "CONFIRMED"
-STATUS_EXPIRED = "EXPIRED"
-STATUS_CANCELED = "CANCELED"
-STATUS_FAILED = "FAILED"
-
-FAILED_STATUSES = {STATUS_CANCELED, STATUS_FAILED, STATUS_EXPIRED}
-
 
 class PlategaPaymentClient:
     """
-    Клиент для работы с платёжной системой Platega.io.
-
-    Базовый URL API: https://app.platega.io
-    Авторизация: заголовки X-MerchantId и X-Secret в каждом запросе.
+    Клиент для работы с платежной системой Platega.io
+    Поддерживает: СБП (Система быстрых платежей)
     """
-
-    BASE_URL = "https://app.platega.io"
 
     def __init__(self):
         self.merchant_id = PLATEGA_MERCHANT_ID
         self.secret_key = PLATEGA_SECRET_KEY
-        # Полный адрес, на который Platega.io будет слать уведомления об оплате.
-        # Должен указываться в Личном кабинете -> Настройки -> Callback URLs
-        self.callback_url = f"{WEBHOOK_HOST.rstrip('/')}{WEBHOOK_PATH}"
+        self.base_url = "https://api.platega.io"
+        self.callback_url = f"{WEBHOOK_HOST}/platega_callback"
 
-        self._session: Optional[requests.Session] = None
-        self._async_session: Optional[aiohttp.ClientSession] = None
-
-    # ---------------------------------------------------------------- #
-    # Служебное
-    # ---------------------------------------------------------------- #
-
-    def _headers(self) -> Dict[str, str]:
-        return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-MerchantId": self.merchant_id,
-            "X-Secret": self.secret_key,
-        }
+        # Для синхронных запросов
+        self._session = None
+        # Для асинхронных запросов
+        self._async_session = None
 
     def _get_session(self) -> requests.Session:
+        """Создает или возвращает существующую синхронную сессию"""
         if self._session is None:
             self._session = requests.Session()
-            self._session.headers.update(self._headers())
+            self._session.headers.update({
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            })
         return self._session
 
     async def _get_async_session(self) -> aiohttp.ClientSession:
+        """Создает или возвращает существующую асинхронную сессию"""
         if self._async_session is None or self._async_session.closed:
-            self._async_session = aiohttp.ClientSession(headers=self._headers())
+            self._async_session = aiohttp.ClientSession()
         return self._async_session
 
-    @staticmethod
-    def _safe_json(response) -> Dict[str, Any]:
+    def _generate_signature(self, data: Dict[str, Any]) -> str:
+        """
+        Генерирует подпись для запроса к Platega.io
+        Используется алгоритм HMAC-SHA256
+        """
+        # Сортируем данные по ключам
+        sorted_data = dict(sorted(data.items()))
+        # Преобразуем в JSON строку
+        json_string = json.dumps(sorted_data, separators=(',', ':'))
+        # Генерируем подпись
+        signature = hmac.new(
+            self.secret_key.encode('utf-8'),
+            json_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        return signature
+
+    def _make_request(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Выполняет синхронный запрос к API Platega.io
+        """
+        url = f"{self.base_url}{endpoint}"
+
+        # Добавляем идентификатор мерчанта
+        data["merchant_id"] = self.merchant_id
+        # Генерируем подпись
+        data["signature"] = self._generate_signature(data)
+
+        session = self._get_session()
+
         try:
-            return response.json()
-        except Exception:
-            return {}
+            response = session.post(url, json=data, timeout=30)
 
-    # ---------------------------------------------------------------- #
-    # Создание платежа — POST app.platega.io/transaction/process
-    # ---------------------------------------------------------------- #
+            # Логируем тело ответа при ошибке ДО raise_for_status,
+            # иначе текст ответа от Platega теряется
+            if response.status_code != 200:
+                logger.error(
+                    f"❌ Platega.io HTTP {response.status_code} | "
+                    f"endpoint: {endpoint} | body: {response.text}"
+                )
 
-    def _build_create_payload(
-        self,
-        amount: float,
-        description: str,
-        transaction_id: str,
-        return_url: str,
-        failed_url: str,
-        payment_method: int,
-        payload: Optional[str],
-    ) -> Dict[str, Any]:
-        body: Dict[str, Any] = {
-            "paymentMethod": payment_method,
-            # Передаём свой UUID транзакции — это позволяет нам однозначно
-            # сопоставить заказ в нашей БД с транзакцией Platega.
-            "id": transaction_id,
-            "paymentDetails": {
-                "amount": float(amount),
-                "currency": "RUB",
-            },
-            "description": description,
-            "return": return_url,
-            "failedUrl": failed_url,
-        }
-        if payload:
-            # Произвольное поле для хранения своей информации (например, telegram_id)
-            body["payload"] = str(payload)
-        return body
+            response.raise_for_status()
+            result = response.json()
+
+            if result.get("status") == "error":
+                error_message = result.get("message", "Unknown error")
+                logger.error(f"❌ Platega.io API error: {error_message}")
+                return {"success": False, "error": error_message, "data": None}
+
+            return {"success": True, "data": result.get("data", result)}
+
+        except requests.exceptions.HTTPError as e:
+            # response.text уже залогирован выше — пользователю отдаём короткое сообщение,
+            # подробности остаются только в логе
+            logger.error(f"❌ Platega.io HTTP error: {e}")
+            return {
+                "success": False,
+                "error": "Платёжный сервис вернул ошибку. Попробуйте позже.",
+                "data": None,
+            }
+        except requests.exceptions.RequestException as e:
+            # Сюда попадают сетевые ошибки (DNS, таймаут, обрыв соединения и т.п.)
+            # Текст исключения может содержать кавычки/скобки/спецсимволы, которые
+            # ломают parse_mode="Markdown" при показе пользователю — поэтому в "error"
+            # кладём безопасный текст, а сырое исключение оставляем только в логе.
+            logger.error(f"❌ Platega.io request error: {e}")
+            return {
+                "success": False,
+                "error": "Не удалось подключиться к платёжному сервису. Попробуйте позже.",
+                "data": None,
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Platega.io JSON decode error: {e}")
+            return {"success": False, "error": "Invalid response format", "data": None}
+
+    async def _make_async_request(self, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Выполняет асинхронный запрос к API Platega.io
+        """
+        url = f"{self.base_url}{endpoint}"
+
+        # Добавляем идентификатор мерчанта
+        data["merchant_id"] = self.merchant_id
+        # Генерируем подпись
+        data["signature"] = self._generate_signature(data)
+
+        session = await self._get_async_session()
+
+        try:
+            async with session.post(url, json=data, timeout=30) as response:
+                # Сначала читаем сырой текст — он нужен и для лога ошибки,
+                # и для парсинга JSON ниже
+                raw_text = await response.text()
+
+                if response.status != 200:
+                    logger.error(
+                        f"❌ Platega.io HTTP {response.status} | "
+                        f"endpoint: {endpoint} | body: {raw_text}"
+                    )
+                    return {
+                        "success": False,
+                        "error": f"HTTP {response.status}: {raw_text}",
+                        "data": None,
+                    }
+
+                result = json.loads(raw_text)
+
+                if result.get("status") == "error":
+                    error_message = result.get("message", "Unknown error")
+                    logger.error(f"❌ Platega.io API error: {error_message}")
+                    return {"success": False, "error": error_message, "data": None}
+
+                return {"success": True, "data": result.get("data", result)}
+
+        except aiohttp.ClientError as e:
+            # Сетевые ошибки (DNS, таймаут, обрыв соединения) — пользователю безопасный текст,
+            # подробности только в лог, чтобы не сломать parse_mode="Markdown" спецсимволами.
+            logger.error(f"❌ Platega.io async request error: {e}")
+            return {
+                "success": False,
+                "error": "Не удалось подключиться к платёжному сервису. Попробуйте позже.",
+                "data": None,
+            }
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ Platega.io JSON decode error: {e}")
+            return {"success": False, "error": "Invalid response format", "data": None}
 
     def create_payment(
         self,
@@ -114,56 +182,55 @@ class PlategaPaymentClient:
         order_id: Optional[str] = None,
         return_url: str = "https://t.me",
         failed_url: str = "https://t.me",
-        payment_method: int = PAYMENT_METHOD_SBP,
-        payload: Optional[str] = None,
+        payment_method: int = 2,  # 2 = СБП
     ) -> Dict[str, Any]:
         """
-        Создаёт платёж через Platega.io (синхронная версия).
+        Создает платеж через Platega.io (синхронная версия)
+
+        Args:
+            amount: Сумма в рублях
+            description: Описание платежа
+            order_id: ID заказа в вашей системе
+            return_url: URL для возврата после успешной оплаты
+            failed_url: URL для возврата после неудачной оплаты
+            payment_method: 2 - СБП, 1 - карта (если поддерживается)
 
         Returns:
-            {success, payment_url, transaction_id, order_id, status, expires_in, data}
+            Dict с результатом: {success, payment_url, transaction_id, order_id}
         """
-        # ID транзакции обязан быть в формате UUID
-        transaction_id = order_id if order_id else str(uuid.uuid4())
-        body = self._build_create_payload(
-            amount, description, transaction_id, return_url, failed_url, payment_method, payload
-        )
+        transaction_id = order_id or f"order_{int(datetime.now().timestamp())}"
 
-        url = f"{self.BASE_URL}/transaction/process"
-        session = self._get_session()
+        data = {
+            "transaction_id": transaction_id,
+            "amount": float(amount),
+            "currency": "RUB",
+            "description": description,
+            "payment_method": payment_method,
+            "return_url": return_url,
+            "failed_url": failed_url,
+            "callback_url": self.callback_url,
+            "merchant_order_id": order_id or transaction_id,
+        }
 
-        try:
-            response = session.post(url, json=body, timeout=30)
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Platega.io request error: {e}")
-            return {"success": False, "error": str(e), "payment_url": None,
-                    "transaction_id": None, "order_id": order_id}
+        result = self._make_request("/v1/create_payment", data)
 
-        data = self._safe_json(response)
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "payment_url": None,
+                "transaction_id": None,
+                "order_id": order_id,
+            }
 
-        if response.status_code >= 400:
-            error_message = data.get("message", f"HTTP {response.status_code}")
-            logger.error(f"❌ Platega.io API error: {error_message}")
-            return {"success": False, "error": error_message, "payment_url": None,
-                    "transaction_id": None, "order_id": order_id}
-
-        # На случай, если сервер вернёт свой собственный transactionId,
-        # отличный от переданного нами id — ориентируемся на ответ сервера.
-        returned_id = data.get("transactionId", transaction_id)
-        if returned_id != transaction_id:
-            logger.warning(
-                f"⚠️ Platega.io вернул transactionId ({returned_id}), "
-                f"отличный от переданного id ({transaction_id}). Используем ответ сервера."
-            )
-
+        response_data = result["data"]
         return {
             "success": True,
-            "payment_url": data.get("redirect"),
-            "transaction_id": returned_id,
-            "order_id": order_id or returned_id,
-            "status": data.get("status"),
-            "expires_in": data.get("expiresIn"),
-            "data": data,
+            "payment_url": response_data.get("payment_url"),
+            "transaction_id": response_data.get("transaction_id"),
+            "order_id": order_id or transaction_id,
+            "status": response_data.get("status"),
+            "data": response_data,
         }
 
     async def create_payment_async(
@@ -173,189 +240,223 @@ class PlategaPaymentClient:
         order_id: Optional[str] = None,
         return_url: str = "https://t.me",
         failed_url: str = "https://t.me",
-        payment_method: int = PAYMENT_METHOD_SBP,
-        payload: Optional[str] = None,
+        payment_method: int = 2,  # 2 = СБП
     ) -> Dict[str, Any]:
-        """Создаёт платёж через Platega.io (асинхронная версия)."""
-        transaction_id = order_id if order_id else str(uuid.uuid4())
-        body = self._build_create_payload(
-            amount, description, transaction_id, return_url, failed_url, payment_method, payload
-        )
+        """
+        Создает платеж через Platega.io (асинхронная версия)
+        """
+        transaction_id = order_id or f"order_{int(datetime.now().timestamp())}"
 
-        url = f"{self.BASE_URL}/transaction/process"
-        session = await self._get_async_session()
+        data = {
+            "transaction_id": transaction_id,
+            "amount": float(amount),
+            "currency": "RUB",
+            "description": description,
+            "payment_method": payment_method,
+            "return_url": return_url,
+            "failed_url": failed_url,
+            "callback_url": self.callback_url,
+            "merchant_order_id": order_id or transaction_id,
+        }
 
-        try:
-            async with session.post(url, json=body, timeout=30) as response:
-                try:
-                    data = await response.json()
-                except Exception:
-                    data = {}
+        result = await self._make_async_request("/v1/create_payment", data)
 
-                if response.status >= 400:
-                    error_message = data.get("message", f"HTTP {response.status}")
-                    logger.error(f"❌ Platega.io API error: {error_message}")
-                    return {"success": False, "error": error_message, "payment_url": None,
-                            "transaction_id": None, "order_id": order_id}
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "payment_url": None,
+                "transaction_id": None,
+                "order_id": order_id,
+            }
 
-                returned_id = data.get("transactionId", transaction_id)
-                return {
-                    "success": True,
-                    "payment_url": data.get("redirect"),
-                    "transaction_id": returned_id,
-                    "order_id": order_id or returned_id,
-                    "status": data.get("status"),
-                    "expires_in": data.get("expiresIn"),
-                    "data": data,
-                }
-        except aiohttp.ClientError as e:
-            logger.error(f"❌ Platega.io async request error: {e}")
-            return {"success": False, "error": str(e), "payment_url": None,
-                    "transaction_id": None, "order_id": order_id}
-
-    # ---------------------------------------------------------------- #
-    # Проверка статуса — GET app.platega.io/transaction/{id}
-    # ---------------------------------------------------------------- #
+        response_data = result["data"]
+        return {
+            "success": True,
+            "payment_url": response_data.get("payment_url"),
+            "transaction_id": response_data.get("transaction_id"),
+            "order_id": order_id or transaction_id,
+            "status": response_data.get("status"),
+            "data": response_data,
+        }
 
     def check_payment_status(self, transaction_id: str) -> Dict[str, Any]:
-        """Проверяет статус платежа (синхронная версия)."""
-        url = f"{self.BASE_URL}/transaction/{transaction_id}"
-        session = self._get_session()
+        """
+        Проверяет статус платежа (синхронная версия)
 
-        try:
-            response = session.get(url, timeout=30)
-        except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Platega.io request error: {e}")
-            return {"success": False, "error": str(e), "status": None, "is_paid": False}
+        Args:
+            transaction_id: ID транзакции в Platega.io
 
-        data = self._safe_json(response)
+        Returns:
+            Dict с результатом: {success, status, is_paid}
+        """
+        data = {
+            "transaction_id": transaction_id,
+        }
 
-        if response.status_code >= 400:
-            error_message = data.get("message", f"HTTP {response.status_code}")
-            logger.error(f"❌ Platega.io API error: {error_message}")
-            return {"success": False, "error": error_message, "status": None, "is_paid": False}
+        result = self._make_request("/v1/check_payment", data)
 
-        status = data.get("status")
-        payment_details = data.get("paymentDetails") or {}
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "status": None,
+                "is_paid": False,
+            }
+
+        response_data = result["data"]
+        status = response_data.get("status")
 
         return {
             "success": True,
             "status": status,
-            "is_paid": status == STATUS_CONFIRMED,
-            "is_failed": status in FAILED_STATUSES,
-            "amount": payment_details.get("amount"),
-            "transaction_id": data.get("id", transaction_id),
-            "payload": data.get("payload"),
-            "data": data,
+            "is_paid": status == "CONFIRMED",
+            "amount": response_data.get("amount"),
+            "transaction_id": response_data.get("transaction_id"),
+            "data": response_data,
         }
 
     async def check_payment_status_async(self, transaction_id: str) -> Dict[str, Any]:
-        """Проверяет статус платежа (асинхронная версия)."""
-        url = f"{self.BASE_URL}/transaction/{transaction_id}"
-        session = await self._get_async_session()
-
-        try:
-            async with session.get(url, timeout=30) as response:
-                try:
-                    data = await response.json()
-                except Exception:
-                    data = {}
-
-                if response.status >= 400:
-                    error_message = data.get("message", f"HTTP {response.status}")
-                    logger.error(f"❌ Platega.io API error: {error_message}")
-                    return {"success": False, "error": error_message, "status": None, "is_paid": False}
-
-                status = data.get("status")
-                payment_details = data.get("paymentDetails") or {}
-
-                return {
-                    "success": True,
-                    "status": status,
-                    "is_paid": status == STATUS_CONFIRMED,
-                    "is_failed": status in FAILED_STATUSES,
-                    "amount": payment_details.get("amount"),
-                    "transaction_id": data.get("id", transaction_id),
-                    "payload": data.get("payload"),
-                    "data": data,
-                }
-        except aiohttp.ClientError as e:
-            logger.error(f"❌ Platega.io async request error: {e}")
-            return {"success": False, "error": str(e), "status": None, "is_paid": False}
-
-    # ---------------------------------------------------------------- #
-    # Callback от Platega.io (входящие уведомления об оплате)
-    # ---------------------------------------------------------------- #
-
-    def verify_callback_headers(self, merchant_id_header: str, secret_header: str) -> bool:
         """
-        Platega.io присылает callback с заголовками X-MerchantId и X-Secret —
-        нужно сверить их с нашими собственными значениями (НЕ HMAC-подпись!).
+        Проверяет статус платежа (асинхронная версия)
         """
-        return (
-            merchant_id_header == self.merchant_id
-            and secret_header == self.secret_key
-            and bool(self.merchant_id)
-            and bool(self.secret_key)
-        )
+        data = {
+            "transaction_id": transaction_id,
+        }
 
-    def handle_callback(
-        self,
-        body: Dict[str, Any],
-        merchant_id_header: str,
-        secret_header: str,
-    ) -> Dict[str, Any]:
-        """
-        Обрабатывает callback-уведомление от Platega.io.
+        result = await self._make_async_request("/v1/check_payment", data)
 
-        Тело запроса (CallbackPayload):
-            {"id": "...", "amount": 0.0, "currency": "RUB",
-            "status": "CONFIRMED", "paymentMethod": 2}
-        """
-        if not self.verify_callback_headers(merchant_id_header, secret_header):
-            logger.warning("❌ Platega callback: неверные X-MerchantId/X-Secret")
-            return {"success": False, "error": "invalid credentials"}
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error"),
+                "status": None,
+                "is_paid": False,
+            }
 
-        transaction_id = body.get("id")
-        status = body.get("status")
-
-        logger.info(f"📨 Platega callback: transaction={transaction_id} status={status}")
+        response_data = result["data"]
+        status = response_data.get("status")
 
         return {
             "success": True,
-            "transaction_id": transaction_id,
             "status": status,
-            "is_paid": status == STATUS_CONFIRMED,
-            "is_failed": status in FAILED_STATUSES,
-            "amount": body.get("amount"),
-            "currency": body.get("currency"),
-            "payment_method": body.get("paymentMethod"),
+            "is_paid": status == "CONFIRMED",
+            "amount": response_data.get("amount"),
+            "transaction_id": response_data.get("transaction_id"),
+            "data": response_data,
         }
 
-    # ---------------------------------------------------------------- #
-    # Закрытие соединений
-    # ---------------------------------------------------------------- #
+    def verify_callback_signature(self, data: Dict[str, Any], signature: str) -> bool:
+        """
+        Проверяет подпись callback-уведомления от Platega.io
+
+        Args:
+            data: Данные callback
+            signature: Подпись из заголовка X-Signature
+
+        Returns:
+            True если подпись верна, иначе False
+        """
+        # Удаляем подпись из данных для проверки
+        data_copy = data.copy()
+        data_copy.pop("signature", None)
+
+        # Генерируем подпись
+        expected_signature = self._generate_signature(data_copy)
+
+        return signature == expected_signature
+
+    def handle_callback(self, request_data: Dict[str, Any], signature: str) -> Dict[str, Any]:
+        """
+        Обрабатывает callback-уведомление от Platega.io
+
+        Args:
+            request_data: JSON-данные от Platega.io
+            signature: Подпись из заголовка X-Signature
+
+        Returns:
+            Dict с информацией о платеже
+        """
+        # Проверяем подпись
+        if not self.verify_callback_signature(request_data, signature):
+            logger.warning("❌ Invalid callback signature")
+            return {
+                "success": False,
+                "error": "Invalid signature",
+                "response": "bad sign"
+            }
+
+        event_type = request_data.get("event")
+        payload = request_data.get("payload", {})
+
+        logger.info(f"📨 Platega callback: {event_type} for {payload.get('transaction_id')}")
+
+        if event_type == "payment_success":
+            return {
+                "success": True,
+                "event": "payment.succeeded",
+                "transaction_id": payload.get("transaction_id"),
+                "order_id": payload.get("merchant_order_id"),
+                "amount": payload.get("amount"),
+                "status": payload.get("status"),
+                "response": "OK",
+            }
+        elif event_type == "payment_failed":
+            return {
+                "success": True,
+                "event": "payment.failed",
+                "transaction_id": payload.get("transaction_id"),
+                "order_id": payload.get("merchant_order_id"),
+                "status": payload.get("status"),
+                "response": "OK",
+            }
+        elif event_type == "payment_canceled":
+            return {
+                "success": True,
+                "event": "payment.canceled",
+                "transaction_id": payload.get("transaction_id"),
+                "order_id": payload.get("merchant_order_id"),
+                "response": "OK",
+            }
+
+        return {
+            "success": True,
+            "event": f"payment.{event_type}" if event_type else "unknown",
+            "transaction_id": payload.get("transaction_id"),
+            "order_id": payload.get("merchant_order_id"),
+            "response": "OK",
+        }
 
     def close(self):
+        """
+        Закрывает синхронное соединение (requests.Session)
+        """
         if self._session:
             self._session.close()
             self._session = None
             logger.info("🔒 Platega.io sync session closed")
 
     async def close_async(self):
+        """
+        Закрывает асинхронное соединение (aiohttp.ClientSession)
+        """
         if self._async_session and not self._async_session.closed:
             await self._async_session.close()
             self._async_session = None
             logger.info("🔒 Platega.io async session closed")
 
     def __enter__(self):
+        """Поддержка контекстного менеджера (синхронного)"""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Автоматическое закрытие при выходе из контекста"""
         self.close()
 
     async def __aenter__(self):
+        """Поддержка асинхронного контекстного менеджера"""
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Автоматическое закрытие при выходе из асинхронного контекста"""
         await self.close_async()
