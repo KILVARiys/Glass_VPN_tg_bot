@@ -43,33 +43,31 @@ class PromoStates(StatesGroup):
 async def activate_subscription(telegram_id: int, days: int = SUB_DAYS,
                                 payment_method: str = "unknown",
                                 bot: Bot = None,
-                                total_gb: int = 0):
+                                total_gb: int = 0,
+                                edit_chat_id: int = None,
+                                edit_message_id: int = None):
     user = get_user(telegram_id)
     if not user:
         return False, "Пользователь не найден"
 
-    email = user[3]  # email клиента
+    email = user[3]
     is_trial = payment_method == "🎁 Пробный период"
     limit_ip = 1 if is_trial else 3
 
-    # 1. Проверяем, существует ли уже клиент с таким email
     sub_id = xui.find_client_sub_id(email)
-    
     if sub_id:
-        # 2. Клиент существует – обновляем его
+        # Клиент существует – обновляем
         expiry_time = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
         success = xui.update_client(
-            client_id=sub_id,
             email=email,
             total_gb=total_gb,
             expiry_time=expiry_time,
             limit_ip=limit_ip
         )
         if not success:
-            return False, "Не удалось обновить клиента в панели"
-        # Подписка уже продлена в БД позже, после этого блока
+            return False, "Не удалось обновить подписку. Попробуйте позже."
     else:
-        # 3. Клиента нет – создаём нового
+        # Клиента нет – создаём нового
         success, sub_id, msg = xui.create_client(
             email=email,
             days=days,
@@ -79,16 +77,14 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS,
         if not success:
             return False, f"Ошибка создания клиента: {msg}"
 
-    # 4. Обновляем срок подписки в БД
+    # Обновляем БД
     new_end = update_subscription(telegram_id, days)
     days_left = (new_end - datetime.now()).days
     expiry_str = new_end.strftime('%d.%m.%Y')
 
-    # 5. Получаем ссылку
     sub_link = xui.get_subscription_link(sub_id) if sub_id else None
     devices_text = "1 устройство" if is_trial else "3 устройства"
 
-    # 6. Отправляем сообщение пользователю
     if sub_link:
         message_text = (
             f"✅ *Подписка активирована!*\n\n"
@@ -113,19 +109,31 @@ async def activate_subscription(telegram_id: int, days: int = SUB_DAYS,
         if bot is None:
             from config import BOT_TOKEN
             bot = Bot(token=BOT_TOKEN)
-        await bot.send_message(
-            telegram_id,
-            message_text,
-            parse_mode="MarkdownV2",
-            reply_markup=main_menu_without_trial()
-        )
+
+        if edit_chat_id and edit_message_id:
+            await bot.edit_message_text(
+                chat_id=edit_chat_id,
+                message_id=edit_message_id,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=main_menu_without_trial()
+            )
+        else:
+            await bot.send_message(
+                telegram_id,
+                message_text,
+                parse_mode="MarkdownV2",
+                reply_markup=main_menu_without_trial()
+            )
     except Exception as e:
         logger.error(f"❌ Ошибка отправки уведомления: {e}")
 
     return True, new_end
 
 
-async def activate_trial_subscription(telegram_id: int, bot: Bot = None):
+async def activate_trial_subscription(telegram_id: int, bot: Bot = None,
+                                    edit_chat_id: int = None,
+                                    edit_message_id: int = None):
     user = get_user(telegram_id)
     if not user:
         return False, "Пользователь не найден"
@@ -144,16 +152,14 @@ async def activate_trial_subscription(telegram_id: int, bot: Bot = None):
         TRIAL_DAYS,
         "🎁 Пробный период",
         bot=bot,
-        total_gb=5
+        total_gb=5,               # пробный лимит 5 ГБ
+        edit_chat_id=edit_chat_id,
+        edit_message_id=edit_message_id
     )
 
     if result:
         logger.info(f"Попытка установить флаг пробного периода для {telegram_id}")
-        success = set_trial_used(telegram_id)
-        if success:
-            logger.info(f"✅ Флаг успешно установлен для {telegram_id}")
-        else:
-            logger.error(f"❌ Не удалось установить флаг для {telegram_id}")
+        set_trial_used(telegram_id)
         return True, f"✅ Пробный период на {TRIAL_DAYS} дня активирован!"
     else:
         return False, f"❌ Ошибка активации пробного периода: {message}"
@@ -402,11 +408,15 @@ async def activate_trial_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "confirm_trial")
 async def confirm_trial_callback(callback: CallbackQuery):
     telegram_id = callback.from_user.id
-    success, message = await activate_trial_subscription(telegram_id, bot=callback.bot)
+    success, message = await activate_trial_subscription(
+        telegram_id,
+        bot=callback.bot,
+        edit_chat_id=callback.message.chat.id,
+        edit_message_id=callback.message.message_id
+    )
 
-    if success:
-        await callback.message.delete()
-    else:
+    if not success:
+        # При ошибке редактируем сообщение с текстом ошибки
         await callback.message.edit_text(
             f"❌ {message}",
             parse_mode="Markdown",
@@ -511,32 +521,51 @@ async def check_payment_callback(callback: CallbackQuery):
         return
 
     if status["is_paid"]:
-        # Платёж прошёл – подтверждаем в БД
+        # Платёж подтверждён
         confirm_payment(transaction_id)
 
-        # Активацию запускаем в фоне, чтобы не было таймаута у Telegram
-        asyncio.create_task(activate_subscription(
-            telegram_id,
-            SUB_DAYS,
-            "СБП (Platega.io)",
-            bot=callback.bot,
-            total_gb=0          # безлимит для платной подписки
-        ))
-
-        # Сразу отвечаем пользователю
         try:
             await callback.message.edit_text(
-                "✅ Платёж принят. Подписка будет активирована в течение минуты.",
+                "✅ Платёж получен!\n\n"
+                "⏳ Подписка активируется в течение минуты.\n"
+                "👉 После этого зайдите в свой профиль — там появится ваша ссылка для подключения.",
                 reply_markup=main_menu_without_trial()
             )
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e):
                 raise
 
-        # Удаляем запись о pending‑платеже
+        # 2. Запускаем активацию в фоне с сохранением chat_id и message_id
+        async def activate_and_update():
+            success, msg = await activate_subscription(
+                telegram_id,
+                SUB_DAYS,
+                "СБП (Platega.io)",
+                bot=callback.bot,
+                total_gb=0,
+                edit_chat_id=callback.message.chat.id,
+                edit_message_id=callback.message.message_id
+            )
+            if not success:
+                # Если активация не удалась, заменяем сообщение на ошибку
+                try:
+                    await callback.bot.edit_message_text(
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        text=f"❌ *Ошибка активации подписки*\n\n{msg}",
+                        parse_mode="Markdown",
+                        reply_markup=main_menu_without_trial()
+                    )
+                except Exception:
+                    pass
+
+        asyncio.create_task(activate_and_update())
+
+        # Удаляем платёж из pending
         del pending_payments[telegram_id]
 
     else:
+        # Платёж ещё не прошёл
         status_value = status.get("status", "unknown")
         status_messages = {
             "NEW": "⏳ Платеж создан, ожидается оплата",

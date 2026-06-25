@@ -149,31 +149,36 @@ class XUIClient:
             logger.error(f"Ошибка поиска subId: {e}")
             return None
 
-    def update_client(self, client_id: int, email: str, total_gb: int = 0, expiry_time: int = 0, limit_ip: int = 3, enable: bool = True) -> bool:
-        url = f"{self.base_url}/panel/api/inbounds/update/{client_id}"
+    def update_client(self, email: str, total_gb: int = 0,
+                    expiry_time: int = 0, limit_ip: int = 3,
+                    enable: bool = True, flow: str = "xtls-rprx-vision") -> bool:
+        """
+        Обновляет существующего клиента по email через /panel/api/clients/update/{email}
+        """
+        if not self.logged_in:
+            self.login()
+        url = f"{self.base_url}/panel/api/clients/update/{email}"
+        total_bytes = total_gb * 1024 * 1024 * 1024
         payload = {
-            "id": client_id,
-            "settings": json.dumps({
-                "clients": [{
-                    "email": email,
-                    "totalGB": total_gb,
-                    "expiryTime": expiry_time,
-                    "limitIp": limit_ip,
-                    "enable": enable,
-                    "flow": "xtls-rprx-vision",  # или тот же, что был при создании
-                }]
-            })
+            "email": email,
+            "totalGB": total_bytes,
+            "expiryTime": expiry_time,
+            "enable": enable,
+            "limitIp": limit_ip,
+            "flow": flow,
+            "tgId": 0                   # если поле обязательно — оставляем 0
         }
+        logger.info(f"🔄 Обновление клиента {email}: {payload}")
         try:
-            response = self.session.post(url, json=payload, headers=self.headers)
-            if response.status_code == 200 and response.json().get("success"):
+            resp = self.session.post(url, json=payload, timeout=10)
+            if resp.status_code == 200 and resp.json().get("success"):
                 logger.info(f"✅ Клиент {email} обновлён")
                 return True
             else:
-                logger.error(f"❌ Ошибка обновления клиента: {response.text}")
+                logger.error(f"❌ Ошибка обновления клиента: {resp.text}")
                 return False
         except Exception as e:
-            logger.error(f"❌ Ошибка обновления клиента: {e}")
+            logger.error(f"❌ Исключение при обновлении клиента: {e}")
             return False
 
     def get_subscription_link(self, sub_id: str):
@@ -185,6 +190,7 @@ class XUIClient:
         else:
             logger.warning("⚠️ XUI_SUB_URL не задан, используется стандартный /sub/")
             return f"{self.base_url}/sub/{sub_id}"
+
 
     # ===== Остальные методы (если нужны) можно добавить сюда =====
     def get_all_clients(self):
@@ -212,3 +218,4 @@ class XUIClient:
             return clients
         except:
             return []
+        

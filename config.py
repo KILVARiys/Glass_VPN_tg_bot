@@ -16,7 +16,7 @@ XUI_SUB_URL = os.getenv("XUI_SUB_URL", "")  # URL подписки x-ui
 # --- Subscription settings ---
 TRIAL_DAYS = 3
 SUB_DAYS = 30
-PRICE_RUB = 1
+PRICE_RUB = 100
 
 # --- Platega.io ---
 # MerchantId и API-ключ выдаются менеджером при подключении или доступны
