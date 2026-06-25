@@ -1,3 +1,4 @@
+import email
 import requests
 import json
 import uuid
@@ -147,6 +148,33 @@ class XUIClient:
         except Exception as e:
             logger.error(f"Ошибка поиска subId: {e}")
             return None
+
+    def update_client(self, client_id: int, email: str, total_gb: int = 0, expiry_time: int = 0, limit_ip: int = 3, enable: bool = True) -> bool:
+        url = f"{self.base_url}/panel/api/inbounds/update/{client_id}"
+        payload = {
+            "id": client_id,
+            "settings": json.dumps({
+                "clients": [{
+                    "email": email,
+                    "totalGB": total_gb,
+                    "expiryTime": expiry_time,
+                    "limitIp": limit_ip,
+                    "enable": enable,
+                    "flow": "xtls-rprx-vision",  # или тот же, что был при создании
+                }]
+            })
+        }
+        try:
+            response = self.session.post(url, json=payload, headers=self.headers)
+            if response.status_code == 200 and response.json().get("success"):
+                logger.info(f"✅ Клиент {email} обновлён")
+                return True
+            else:
+                logger.error(f"❌ Ошибка обновления клиента: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Ошибка обновления клиента: {e}")
+            return False
 
     def get_subscription_link(self, sub_id: str):
         if not sub_id:

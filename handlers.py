@@ -40,37 +40,55 @@ class PromoStates(StatesGroup):
 
 # ======================== ОСНОВНЫЕ ФУНКЦИИ ============================
 
-async def activate_subscription(telegram_id: int, days: int = SUB_DAYS, payment_method: str = "unknown", bot: Bot = None):
+async def activate_subscription(telegram_id: int, days: int = SUB_DAYS,
+                                payment_method: str = "unknown",
+                                bot: Bot = None,
+                                total_gb: int = 0):
     user = get_user(telegram_id)
     if not user:
-        logger.error(f"User {telegram_id} not found")
         return False, "Пользователь не найден"
 
-    # Определяем лимит устройств: пробная = 1, платная = 3
+    email = user[3]  # email клиента
     is_trial = payment_method == "🎁 Пробный период"
     limit_ip = 1 if is_trial else 3
 
-    success, sub_id, msg = xui.create_client(
-        email=user[3],
-        days=days,
-        total_gb=10,
-        limit_ip=limit_ip
-    )
+    # 1. Проверяем, существует ли уже клиент с таким email
+    sub_id = xui.find_client_sub_id(email)
+    
+    if sub_id:
+        # 2. Клиент существует – обновляем его
+        expiry_time = int((datetime.now() + timedelta(days=days)).timestamp() * 1000)
+        success = xui.update_client(
+            client_id=sub_id,
+            email=email,
+            total_gb=total_gb,
+            expiry_time=expiry_time,
+            limit_ip=limit_ip
+        )
+        if not success:
+            return False, "Не удалось обновить клиента в панели"
+        # Подписка уже продлена в БД позже, после этого блока
+    else:
+        # 3. Клиента нет – создаём нового
+        success, sub_id, msg = xui.create_client(
+            email=email,
+            days=days,
+            total_gb=total_gb,
+            limit_ip=limit_ip
+        )
+        if not success:
+            return False, f"Ошибка создания клиента: {msg}"
 
-    if not success:
-        return False, f"Ошибка создания клиента: {msg}"
-
+    # 4. Обновляем срок подписки в БД
     new_end = update_subscription(telegram_id, days)
     days_left = (new_end - datetime.now()).days
     expiry_str = new_end.strftime('%d.%m.%Y')
 
-    if sub_id:
-        sub_link = xui.get_subscription_link(sub_id)
-    else:
-        sub_link = None
-
+    # 5. Получаем ссылку
+    sub_link = xui.get_subscription_link(sub_id) if sub_id else None
     devices_text = "1 устройство" if is_trial else "3 устройства"
 
+    # 6. Отправляем сообщение пользователю
     if sub_link:
         message_text = (
             f"✅ *Подписка активирована!*\n\n"
@@ -125,7 +143,8 @@ async def activate_trial_subscription(telegram_id: int, bot: Bot = None):
         telegram_id,
         TRIAL_DAYS,
         "🎁 Пробный период",
-        bot=bot
+        bot=bot,
+        total_gb=5
     )
 
     if result:
@@ -265,7 +284,7 @@ async def back_to_payment_callback(callback: CallbackQuery):
         "💳 *Выберите способ оплаты*\n\n"
         "💰 Цена: 100 ₽\n"
         "📅 Срок: 30 дней\n\n"
-        "Оплата через СБП/карту:",
+        "Оплата через СБП:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
     )
@@ -402,7 +421,7 @@ async def extend_subscription_callback(callback: CallbackQuery):
         "💳 *Выберите способ оплаты для продления*\n\n"
         "💰 Цена: 100 ₽\n"
         "📅 Срок: 30 дней\n\n"
-        "Оплата через СБП/карту:",
+        "Оплата через СБП:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
     )
@@ -415,7 +434,7 @@ async def buy_callback(callback: CallbackQuery):
         "💳 *Выберите способ оплаты*\n\n"
         "💰 Цена: 100 ₽\n"
         "📅 Срок: 30 дней\n\n"
-        "Оплата через СБП/карту:",
+        "Оплата через СБП:",
         parse_mode="Markdown",
         reply_markup=payment_methods()
     )
@@ -485,26 +504,38 @@ async def check_payment_callback(callback: CallbackQuery):
     status = platega.check_payment_status(transaction_id)
 
     if not status["success"]:
-        await callback.answer(f"❌ Ошибка проверки: {status.get('error', 'Неизвестная ошибка')}", show_alert=True)
+        await callback.answer(
+            f"❌ Ошибка проверки: {status.get('error', 'Неизвестная ошибка')}",
+            show_alert=True
+        )
         return
 
     if status["is_paid"]:
-            confirm_payment(transaction_id)
-            success, result = await activate_subscription(
-                telegram_id,
-                SUB_DAYS,
-                "СБП (Platega.io)",
-                bot=callback.bot
+        # Платёж прошёл – подтверждаем в БД
+        confirm_payment(transaction_id)
+
+        # Активацию запускаем в фоне, чтобы не было таймаута у Telegram
+        asyncio.create_task(activate_subscription(
+            telegram_id,
+            SUB_DAYS,
+            "СБП (Platega.io)",
+            bot=callback.bot,
+            total_gb=0          # безлимит для платной подписки
+        ))
+
+        # Сразу отвечаем пользователю
+        try:
+            await callback.message.edit_text(
+                "✅ Платёж принят. Подписка будет активирована в течение минуты.",
+                reply_markup=main_menu_without_trial()
             )
-            if success:
-                await callback.message.delete()
-            else:
-                await callback.message.edit_text(
-                    "❌ *Ошибка активации подписки*\n\nПлатеж прошел, но возникла техническая ошибка.",
-                    parse_mode="Markdown",
-                    reply_markup=main_menu()
-                )
-            del pending_payments[telegram_id]
+        except TelegramBadRequest as e:
+            if "message is not modified" not in str(e):
+                raise
+
+        # Удаляем запись о pending‑платеже
+        del pending_payments[telegram_id]
+
     else:
         status_value = status.get("status", "unknown")
         status_messages = {
@@ -515,15 +546,22 @@ async def check_payment_callback(callback: CallbackQuery):
             "FAILED": "❌ Платеж не удался",
         }
         message = status_messages.get(status_value, f"❓ Статус: {status_value}")
+
         if status_value in ["CANCELED", "FAILED"]:
-            await callback.message.edit_text(
-                f"❌ *Платеж был отменен*\n\nПопробуйте еще раз.",
-                parse_mode="Markdown",
-                reply_markup=payment_methods()
-            )
+            try:
+                await callback.message.edit_text(
+                    "❌ *Платеж был отменен*\n\nПопробуйте еще раз.",
+                    parse_mode="Markdown",
+                    reply_markup=payment_methods()
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise
             del pending_payments[telegram_id]
         else:
             await callback.answer(message, show_alert=True)
+
+    await callback.answer()
 
 
 # ПРОМОКОДЫ
